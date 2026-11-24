@@ -1,0 +1,153 @@
+package com.finvault.app.data.repository
+
+import androidx.room.withTransaction
+import com.finvault.app.data.local.*
+import com.finvault.app.domain.ledger.TransactionCommand
+import java.util.UUID
+import kotlinx.coroutines.flow.Flow
+
+class FinVaultRepository(private val database: FinVaultDatabase) {
+    companion object {
+        const val CASH = "account_cash"
+        const val BANK = "account_primary_bank"
+        const val CREDIT_CARD = "account_credit_card"
+        const val GENERAL_EXPENSE = "expense_general"
+        const val FOOD_EXPENSE = "expense_food"
+        const val HOUSING_EXPENSE = "expense_housing"
+        const val TRANSPORT_EXPENSE = "expense_transport"
+        const val SHOPPING_EXPENSE = "expense_shopping"
+        const val SALARY_INCOME = "income_salary"
+        const val OTHER_INCOME = "income_other"
+        const val OPENING_EQUITY = "equity_opening"
+    }
+
+    fun observeBalances(): Flow<List<AccountBalance>> =
+        database.accountDao().observeAccountBalances()
+
+    fun observeTransactions(): Flow<List<FinancialTransactionEntity>> =
+        database.transactionDao().observeTransactions()
+
+    fun observeAccounts(): Flow<List<AccountEntity>> =
+        database.accountDao().observeAccounts()
+
+    suspend fun seedDefaults() {
+        database.accountDao().insertAccounts(
+            listOf(
+                AccountEntity(CASH, "Cash Wallet", "ASSET", isSystem = true),
+                AccountEntity(BANK, "Primary Bank", "ASSET", isSystem = true),
+                AccountEntity(CREDIT_CARD, "Credit Card", "LIABILITY", isSystem = true),
+                AccountEntity(GENERAL_EXPENSE, "General Expense", "EXPENSE", isSystem = true),
+                AccountEntity(FOOD_EXPENSE, "Food & Dining", "EXPENSE", isSystem = true),
+                AccountEntity(HOUSING_EXPENSE, "Housing", "EXPENSE", isSystem = true),
+                AccountEntity(TRANSPORT_EXPENSE, "Transport", "EXPENSE", isSystem = true),
+                AccountEntity(SHOPPING_EXPENSE, "Shopping", "EXPENSE", isSystem = true),
+                AccountEntity(SALARY_INCOME, "Salary", "INCOME", isSystem = true),
+                AccountEntity(OTHER_INCOME, "Other Income", "INCOME", isSystem = true),
+                AccountEntity(OPENING_EQUITY, "Opening Balance Equity", "EQUITY", isSystem = true)
+            )
+        )
+    }
+
+    suspend fun record(command: TransactionCommand) {
+        require(command.title.isNotBlank()) { "Description is required." }
+        require(command.amountMinor > 0) { "Amount must be greater than zero." }
+
+        val accountDao = database.accountDao()
+        val transactionDao = database.transactionDao()
+        val ledgerDao = database.ledgerDao()
+
+        database.withTransaction {
+            val from = command.fromAccountId?.let {
+                accountDao.getAccount(it) ?: error("Source account not found.")
+            }
+            val to = command.toAccountId?.let {
+                accountDao.getAccount(it) ?: error("Destination account not found.")
+            }
+            val category = command.categoryAccountId?.let {
+                accountDao.getAccount(it) ?: error("Category account not found.")
+            }
+
+            when (command.type) {
+                TransactionCommand.Type.EXPENSE -> {
+                    require(from != null && category?.accountType == "EXPENSE") {
+                        "Choose a payment account and expense category."
+                    }
+                    require(from.accountType == "ASSET" || from.accountType == "LIABILITY") {
+                        "Payment must come from an asset or credit-card account."
+                    }
+                }
+                TransactionCommand.Type.INCOME -> {
+                    require(to?.accountType == "ASSET" && category?.accountType == "INCOME") {
+                        "Choose a receiving asset account and income category."
+                    }
+                }
+                TransactionCommand.Type.TRANSFER -> {
+                    require(from != null && to != null) { "Choose both transfer accounts." }
+                    require(from.id != to.id) { "Transfer accounts must be different." }
+                    require(from.accountType in listOf("ASSET", "LIABILITY") &&
+                        to.accountType in listOf("ASSET", "LIABILITY")) {
+                        "Transfers require asset or liability accounts."
+                    }
+                }
+            }
+
+            val transactionId = UUID.randomUUID().toString()
+            val journalId = UUID.randomUUID().toString()
+
+            transactionDao.insertTransaction(
+                FinancialTransactionEntity(
+                    id = transactionId,
+                    title = command.title.trim(),
+                    amountMinor = command.amountMinor,
+                    type = command.type.name,
+                    fromAccountId = command.fromAccountId,
+                    toAccountId = command.toAccountId,
+                    categoryAccountId = command.categoryAccountId,
+                    occurredAt = command.occurredAt,
+                    note = command.note.trim()
+                )
+            )
+
+            ledgerDao.insertJournalEntry(
+                JournalEntryEntity(
+                    id = journalId,
+                    transactionId = transactionId,
+                    description = command.title.trim()
+                )
+            )
+
+            val lines = when (command.type) {
+                TransactionCommand.Type.EXPENSE -> listOf(
+                    line(journalId, category!!.id, debit = command.amountMinor),
+                    line(journalId, from!!.id, credit = command.amountMinor)
+                )
+                TransactionCommand.Type.INCOME -> listOf(
+                    line(journalId, to!!.id, debit = command.amountMinor),
+                    line(journalId, category!!.id, credit = command.amountMinor)
+                )
+                TransactionCommand.Type.TRANSFER -> listOf(
+                    line(journalId, to!!.id, debit = command.amountMinor),
+                    line(journalId, from!!.id, credit = command.amountMinor)
+                )
+            }
+
+            ledgerDao.insertJournalLines(lines)
+            check(ledgerDao.isEntryBalanced(journalId)) {
+                "Ledger validation failed: journal entry is not balanced."
+            }
+        }
+    }
+
+    private fun line(
+        journalId: String,
+        accountId: String,
+        debit: Long = 0,
+        credit: Long = 0
+    ) = JournalLineEntity(
+        id = UUID.randomUUID().toString(),
+        journalEntryId = journalId,
+        accountId = accountId,
+        debitMinor = debit,
+        creditMinor = credit
+    )
+}
