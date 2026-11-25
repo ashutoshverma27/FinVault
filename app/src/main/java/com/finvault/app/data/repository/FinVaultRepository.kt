@@ -3,7 +3,10 @@ package com.finvault.app.data.repository
 import androidx.room.withTransaction
 import com.finvault.app.data.local.*
 import com.finvault.app.domain.ledger.TransactionCommand
+import com.finvault.app.sms.MerchantKey
 import com.finvault.app.sms.SmsBodyCrypto
+import com.finvault.app.sms.SmsIngestion
+import com.finvault.app.sms.SmsParser
 import com.finvault.app.sms.SmsPosting
 import com.finvault.app.sms.SmsTransactionMapper
 import java.util.UUID
@@ -23,6 +26,9 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
         const val HOUSING_EXPENSE = "expense_housing"
         const val TRANSPORT_EXPENSE = "expense_transport"
         const val SHOPPING_EXPENSE = "expense_shopping"
+        const val BILLS_EXPENSE = "expense_bills"
+        const val HEALTH_EXPENSE = "expense_health"
+        const val ENTERTAINMENT_EXPENSE = "expense_entertainment"
 
         const val SALARY_INCOME = "income_salary"
         const val OTHER_INCOME = "income_other"
@@ -33,6 +39,10 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
 
         private const val SELF_TRANSFER_WINDOW = 30 * 60_000L
         private const val CARD_PAYMENT_WINDOW = 3 * 24 * 60 * 60_000L
+        /** Two SMS quoting the same reference can arrive days apart (NEFT batches, delayed alerts). */
+        private const val REFERENCE_WINDOW = 3 * 24 * 60 * 60_000L
+        private const val SAME_PAYMENT_WINDOW = 7 * 24 * 60 * 60_000L
+        private const val REFUND_LOOKBACK = 60L * 24 * 60 * 60_000L
     }
 
     fun observeBalances(): Flow<List<AccountBalance>> =
@@ -56,15 +66,27 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     /**
      * Adds a detected SMS straight to the ledger using the parser's suggestions.
      * It stays in the "auto-added" list until the user confirms, edits or removes it.
-     * Returns false if the SMS needs manual input (e.g. refunds).
+     *
+     * Before posting, the SMS is checked against what is already in the ledger:
+     *  - a second alert for the same payment (same reference) is dropped;
+     *  - the other half of a transfer between the user's own accounts is merged
+     *    with its partner into one TRANSFER, so it is neither spending nor income;
+     *  - learned rules (merchant -> category, payee -> own account) are applied.
      */
     suspend fun autoPostSms(item: SmsObservationEntity): Boolean {
         if (item.status != "NEEDS_REVIEW") return false
-        val posting = SmsTransactionMapper.posting(item, SmsBodyCrypto.decrypt(item.body)) ?: return false
+        val base = SmsTransactionMapper.posting(item, SmsBodyCrypto.decrypt(item.body)) ?: return false
 
         return runCatching {
             database.withTransaction {
-                database.accountDao().insertAccounts(posting.accounts)
+                database.accountDao().insertAccounts(base.accounts)
+
+                val posting = applyLearnedRules(resolveOwnCounterparty(base))
+
+                if (isAlreadyRecorded(posting, item.id)) {
+                    database.smsObservationDao().updateStatus(item.id, "MERGED")
+                    return@withTransaction
+                }
 
                 val partner = findPartner(posting)
                 if (partner == null) {
@@ -76,27 +98,218 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
         }.isSuccess
     }
 
+    private data class Partner(val transaction: FinancialTransactionEntity, val referenceMatched: Boolean)
+
+    /** Reference number quoted in the SMS a transaction was created from, if any. */
+    private suspend fun referenceOf(transaction: FinancialTransactionEntity): String? {
+        val smsId = transaction.sourceObservationId ?: return null
+        val sms = database.smsObservationDao().getById(smsId) ?: return null
+        return runCatching { SmsParser.parse(SmsBodyCrypto.decrypt(sms.body))?.referenceId }.getOrNull()
+    }
+
+    /**
+     * Same reference, allowing for banks that print only the last digits.
+     * Returns null when either side has no reference (unknown).
+     */
+    private fun referencesMatch(a: String?, b: String?): Boolean? {
+        if (a == null || b == null) return null
+        if (a == b) return true
+        return a.length >= 10 && b.length >= 10 && a.takeLast(10) == b.takeLast(10)
+    }
+
+    private fun isOwnAsset(accountId: String?) = accountId == BANK || accountId?.startsWith("bank_") == true
+
+    private fun isOwnSpecific(accountId: String?) =
+        accountId?.startsWith("bank_") == true || accountId?.startsWith("card_") == true
+
+    /**
+     * If the SMS names a second masked account that the user already has
+     * (e.g. "IMPS from A/c XX1234 to A/c XX5678"), it is a transfer between
+     * the user's own accounts even when the other bank sends no SMS.
+     */
+    private suspend fun resolveOwnCounterparty(posting: SmsPosting): SmsPosting {
+        if (posting.otherAccountHints.isEmpty()) return posting
+        val command = posting.command
+        val own = posting.ownAccountId
+        val ownSuffix = own.substringAfterLast('_')
+        val ownAccounts = database.accountDao().getOwnSmsAccounts()
+
+        val other = posting.otherAccountHints
+            .map { it.takeLast(4) }
+            .filter { it != ownSuffix }
+            .firstNotNullOfOrNull { hint ->
+                ownAccounts.firstOrNull { it.id != own && it.id.substringAfterLast('_') == hint }
+            } ?: return posting
+
+        val transfer = when (command.type) {
+            TransactionCommand.Type.EXPENSE -> if (isOwnAsset(own)) command.copy(
+                type = TransactionCommand.Type.TRANSFER,
+                title = if (other.id.startsWith("card_")) "Credit card bill payment" else "Self transfer",
+                fromAccountId = own, toAccountId = other.id, categoryAccountId = null
+            ) else null
+
+            TransactionCommand.Type.INCOME -> if (other.id.startsWith("bank_")) command.copy(
+                type = TransactionCommand.Type.TRANSFER, title = "Self transfer",
+                fromAccountId = other.id, toAccountId = own, categoryAccountId = null
+            ) else null
+
+            // Bank-side SMS of a card bill payment: pin the specific card.
+            TransactionCommand.Type.TRANSFER ->
+                if (command.toAccountId == CREDIT_CARD && other.id.startsWith("card_")) {
+                    command.copy(toAccountId = other.id)
+                } else null
+
+            TransactionCommand.Type.REFUND -> null
+        } ?: return posting
+
+        return posting.copy(command = transfer)
+    }
+
+    /** Applies what the user taught the app about this merchant / payee. */
+    private suspend fun applyLearnedRules(posting: SmsPosting): SmsPosting {
+        val command = posting.command
+        val key = posting.merchantKey ?: MerchantKey.fromTitle(command.title)
+        val rule = key?.let { database.merchantRuleDao().get(it) }
+
+        if (rule?.kind == MerchantRuleEntity.SELF) {
+            val target = database.accountDao().getAccount(rule.targetId)
+            if (target != null && target.accountType in listOf("ASSET", "LIABILITY")) {
+                val transfer = when (command.type) {
+                    TransactionCommand.Type.EXPENSE ->
+                        if (isOwnAsset(command.fromAccountId) || command.fromAccountId == CASH) {
+                            command.copy(
+                                type = TransactionCommand.Type.TRANSFER, title = "Self transfer",
+                                toAccountId = target.id, categoryAccountId = null
+                            )
+                        } else null
+
+                    TransactionCommand.Type.INCOME -> command.copy(
+                        type = TransactionCommand.Type.TRANSFER, title = "Self transfer",
+                        fromAccountId = target.id, categoryAccountId = null
+                    )
+
+                    else -> null
+                }
+                if (transfer != null && transfer.fromAccountId != transfer.toAccountId) {
+                    return posting.copy(command = transfer)
+                }
+            }
+        }
+
+        val category = when {
+            command.type != TransactionCommand.Type.EXPENSE && command.type != TransactionCommand.Type.REFUND -> null
+            rule?.kind == MerchantRuleEntity.CATEGORY -> rule.targetId
+            command.type == TransactionCommand.Type.REFUND -> refundCategory(posting)
+            else -> null
+        }
+        if (category != null && database.accountDao().getAccount(category)?.accountType == "EXPENSE") {
+            return posting.copy(command = command.copy(categoryAccountId = category))
+        }
+        return posting
+    }
+
+    /** A refund belongs to the same category as the purchase it reverses. */
+    private suspend fun refundCategory(posting: SmsPosting): String? {
+        val command = posting.command
+        val recent = database.transactionDao().getExpensesBetween(command.occurredAt - REFUND_LOOKBACK, command.occurredAt)
+
+        posting.referenceId?.let { ref ->
+            recent.filter { it.amountMinor == command.amountMinor }
+                .firstOrNull { referencesMatch(ref, referenceOf(it)) == true }
+                ?.let { return it.categoryAccountId }
+        }
+        posting.merchantKey?.let { key ->
+            recent.firstOrNull { MerchantKey.fromTitle(it.title) == key }?.let { return it.categoryAccountId }
+        }
+        return recent.firstOrNull {
+            it.amountMinor == command.amountMinor &&
+                    it.fromAccountId == command.toAccountId &&
+                    it.occurredAt >= command.occurredAt - SAME_PAYMENT_WINDOW
+        }?.categoryAccountId
+    }
+
+    /**
+     * True when the movement in this SMS is already in the ledger:
+     *  - another alert for the same payment (same type, amount and reference), or
+     *  - a transfer between the user's own accounts that already covers this
+     *    side (e.g. recorded from the other bank's SMS, by a learned rule, or by hand).
+     */
+    private suspend fun isAlreadyRecorded(posting: SmsPosting, smsId: String): Boolean {
+        val command = posting.command
+        val ref = posting.referenceId
+        val window = if (ref != null) REFERENCE_WINDOW else SELF_TRANSFER_WINDOW
+        val candidates = database.transactionDao().findByAmount(
+            listOf(command.type.name, "TRANSFER"), command.amountMinor,
+            command.occurredAt - window, command.occurredAt + window
+        ).filter { it.sourceObservationId != smsId }
+
+        for (candidate in candidates) {
+            val sameRef = referencesMatch(ref, referenceOf(candidate))
+            if (sameRef == false) continue
+
+            // Card bill payments have a bank-side and a card-side SMS; findPartner merges those.
+            if (candidate.type == command.type.name && sameRef == true &&
+                command.type != TransactionCommand.Type.TRANSFER
+            ) return true
+
+            if (candidate.type == "TRANSFER" && command.type != TransactionCommand.Type.TRANSFER) {
+                val between = isOwnSpecific(candidate.fromAccountId) && isOwnSpecific(candidate.toAccountId)
+                val closeInTime = kotlin.math.abs(candidate.occurredAt - command.occurredAt) <= SELF_TRANSFER_WINDOW
+                if (!(sameRef == true || (between && closeInTime))) continue
+
+                val covers = when (command.type) {
+                    TransactionCommand.Type.EXPENSE -> candidate.fromAccountId == posting.ownAccountId
+                    TransactionCommand.Type.INCOME, TransactionCommand.Type.REFUND ->
+                        candidate.toAccountId == posting.ownAccountId
+                    TransactionCommand.Type.TRANSFER -> false
+                }
+                if (covers && isOwnSpecific(posting.ownAccountId)) return true
+            }
+        }
+        return false
+    }
+
     /**
      * Finds the other half of a movement between the user's own accounts:
      *  - a debit from one own bank account + a credit of the same amount into
-     *    another own bank account within 30 minutes (self transfer), or
+     *    another own bank account. With a matching UPI / IMPS / NEFT reference
+     *    the two can be up to 3 days apart (NEFT batches, late SMS); without a
+     *    reference they must be within 30 minutes and both on known accounts.
      *  - the bank-side and card-side SMS of one credit card bill payment.
      */
-    private suspend fun findPartner(posting: SmsPosting): FinancialTransactionEntity? {
+    private suspend fun findPartner(posting: SmsPosting): Partner? {
         val command = posting.command
         val own = posting.ownAccountId
+        val ref = posting.referenceId
         val dao = database.transactionDao()
 
         return when (command.type) {
             TransactionCommand.Type.EXPENSE, TransactionCommand.Type.INCOME -> {
-                if (!own.startsWith("bank_")) return null
+                if (!isOwnAsset(own)) return null
                 val opposite = if (command.type == TransactionCommand.Type.EXPENSE) "INCOME" else "EXPENSE"
-                dao.findAutoPostedCandidates(
-                    opposite, command.amountMinor,
-                    command.occurredAt - SELF_TRANSFER_WINDOW, command.occurredAt + SELF_TRANSFER_WINDOW
-                ).firstOrNull { candidate ->
+                val window = if (ref != null) REFERENCE_WINDOW else SELF_TRANSFER_WINDOW
+                // Already-confirmed SMS are only paired on a matching reference.
+                val statuses = if (ref != null) listOf("AUTO_POSTED", "POSTED") else listOf("AUTO_POSTED")
+
+                dao.findSmsCandidates(
+                    statuses, opposite, command.amountMinor,
+                    command.occurredAt - window, command.occurredAt + window
+                ).firstNotNullOfOrNull { candidate ->
                     val candidateOwn = if (opposite == "INCOME") candidate.toAccountId else candidate.fromAccountId
-                    candidateOwn != null && candidateOwn.startsWith("bank_") && candidateOwn != own
+                    if (!isOwnAsset(candidateOwn) || candidateOwn == own) return@firstNotNullOfOrNull null
+
+                    when (referencesMatch(ref, referenceOf(candidate))) {
+                        true -> Partner(candidate, referenceMatched = true)
+                        false -> null
+                        null -> {
+                            val status = candidate.sourceObservationId
+                                ?.let { database.smsObservationDao().getById(it)?.status }
+                            val close = kotlin.math.abs(candidate.occurredAt - command.occurredAt) <= SELF_TRANSFER_WINDOW
+                            if (status == "AUTO_POSTED" && close &&
+                                own.startsWith("bank_") && candidateOwn!!.startsWith("bank_")
+                            ) Partner(candidate, referenceMatched = false) else null
+                        }
+                    }
                 }
             }
 
@@ -105,16 +318,19 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                 dao.findAutoPostedCandidates(
                     "TRANSFER", command.amountMinor,
                     command.occurredAt - CARD_PAYMENT_WINDOW, command.occurredAt + CARD_PAYMENT_WINDOW
-                ).firstOrNull { isCard(it.toAccountId) }
+                ).firstOrNull { isCard(it.toAccountId) }?.let { Partner(it, referenceMatched = false) }
             }
+
+            TransactionCommand.Type.REFUND -> null
         }
     }
 
     private suspend fun mergeWithPartner(
         posting: SmsPosting,
-        partner: FinancialTransactionEntity,
+        found: Partner,
         smsId: String
     ) {
+        val partner = found.transaction
         val command = posting.command
         val (from, to, title) = when (command.type) {
             TransactionCommand.Type.EXPENSE -> Triple(posting.ownAccountId, partner.toAccountId!!, "Self transfer")
@@ -127,6 +343,19 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                     ?: command.toAccountId!!,
                 "Credit card bill payment"
             )
+            TransactionCommand.Type.REFUND -> error("Refunds are not paired.")
+        }
+
+        // A reference-matched pair proves the payee / payer name is the user's own
+        // account, so future payments to that name are transfers even without the
+        // other bank's SMS.
+        if (found.referenceMatched && command.type != TransactionCommand.Type.TRANSFER) {
+            val (debitTitle, creditTitle) =
+                if (command.type == TransactionCommand.Type.EXPENSE) command.title to partner.title
+                else partner.title to command.title
+            val debitKey = if (command.type == TransactionCommand.Type.EXPENSE) posting.merchantKey else null
+            (debitKey ?: MerchantKey.fromTitle(debitTitle))?.let { learnSelf(it, to) }
+            MerchantKey.fromTitle(creditTitle)?.let { learnSelf(it, from) }
         }
 
         val partnerSmsId = partner.sourceObservationId
@@ -146,6 +375,13 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             smsId,
             "AUTO_POSTED"
         )
+    }
+
+    private suspend fun learnSelf(key: String, accountId: String) {
+        // Never let a learned rule override a category the user picked for a real merchant.
+        val existing = database.merchantRuleDao().get(key)
+        if (existing != null && existing.kind != MerchantRuleEntity.SELF) return
+        database.merchantRuleDao().upsert(MerchantRuleEntity(key, MerchantRuleEntity.SELF, accountId))
     }
 
     private fun isCard(accountId: String?) =
@@ -168,7 +404,150 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             dao.deleteAutoPostedTransactions()
             dao.resetAutoPostedStatus()
         }
+        // Refresh suggestions with the current parser (e.g. refunds that used to be manual-only).
+        SmsIngestion.reclassifyPending(database)
         autoPostPendingSms()
+    }
+
+    /**
+     * Re-checks SMS expenses sitting in "General" against learned rules and
+     * the current merchant keywords, and moves them to a better category.
+     * Expenses the user put in another category are left alone.
+     */
+    suspend fun recategorizeGeneralSmsExpenses(): Int = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            var moved = 0
+            database.transactionDao().getSmsExpensesInCategory(GENERAL_EXPENSE).forEach { transaction ->
+                val sms = transaction.sourceObservationId?.let { database.smsObservationDao().getById(it) }
+                val parsed = sms?.let { runCatching { SmsParser.parse(SmsBodyCrypto.decrypt(it.body)) }.getOrNull() }
+
+                val key = MerchantKey.fromMerchant(parsed?.merchant) ?: MerchantKey.fromTitle(transaction.title)
+                val rule = key?.let { database.merchantRuleDao().get(it) }
+                val category = when {
+                    rule?.kind == MerchantRuleEntity.CATEGORY -> rule.targetId
+                    parsed != null -> parsed.suggestedCategoryId
+                    else -> SmsParser.categoryFor(transaction.title)
+                }
+                if (category != null && category != GENERAL_EXPENSE &&
+                    database.accountDao().getAccount(category)?.accountType == "EXPENSE"
+                ) {
+                    moveCategory(transaction, category)
+                    moved++
+                }
+            }
+            moved
+        }
+    }
+
+    /**
+     * Changes the category of an expense or refund. With [applyToMerchant],
+     * every other transaction from the same merchant moves too and future
+     * SMS from that merchant use this category.
+     * Returns how many transactions changed.
+     */
+    suspend fun changeCategory(transactionId: String, categoryId: String, applyToMerchant: Boolean): Int =
+        database.withTransaction {
+            val transaction = database.transactionDao().getTransaction(transactionId) ?: error("Transaction not found.")
+            require(transaction.type == "EXPENSE" || transaction.type == "REFUND") {
+                "Only expenses and refunds have a spending category."
+            }
+            require(database.accountDao().getAccount(categoryId)?.accountType == "EXPENSE") {
+                "Choose an expense category."
+            }
+
+            var changed = if (moveCategory(transaction, categoryId)) 1 else 0
+            transaction.sourceObservationId?.let { markChecked(it) }
+
+            val key = MerchantKey.fromTitle(transaction.title)
+            if (applyToMerchant && key != null) {
+                database.merchantRuleDao().upsert(MerchantRuleEntity(key, MerchantRuleEntity.CATEGORY, categoryId))
+                database.transactionDao().getSpendingTransactions()
+                    .filter { it.id != transaction.id && MerchantKey.fromTitle(it.title) == key }
+                    .forEach { if (moveCategory(it, categoryId)) changed++ }
+            }
+            changed
+        }
+
+    /**
+     * Re-records an expense as money sent to one of the user's own accounts,
+     * or an income as money received from one. If the other bank's SMS was
+     * already recorded as income / expense, it is absorbed into this transfer.
+     * With [remember], future SMS to / from this payee become transfers too.
+     */
+    suspend fun convertToOwnTransfer(transactionId: String, otherAccountId: String, remember: Boolean) {
+        database.withTransaction {
+            val transaction = database.transactionDao().getTransaction(transactionId) ?: error("Transaction not found.")
+            val other = database.accountDao().getAccount(otherAccountId) ?: error("Account not found.")
+            require(other.accountType == "ASSET" || other.accountType == "LIABILITY") {
+                "Choose one of your accounts."
+            }
+
+            val (from, to, oppositeType) = when (transaction.type) {
+                "EXPENSE" -> Triple(transaction.fromAccountId!!, other.id, "INCOME")
+                "INCOME" -> Triple(other.id, transaction.toAccountId!!, "EXPENSE")
+                else -> error("Only expenses and income can be turned into a transfer.")
+            }
+            require(from != to) { "Choose a different account." }
+
+            // The other half, if its SMS was recorded separately.
+            val otherHalf = database.transactionDao().findByAmount(
+                listOf(oppositeType), transaction.amountMinor,
+                transaction.occurredAt - REFERENCE_WINDOW, transaction.occurredAt + REFERENCE_WINDOW
+            ).firstOrNull { candidate ->
+                candidate.id != transaction.id && candidate.sourceObservationId != null &&
+                        (if (oppositeType == "INCOME") candidate.toAccountId == to else candidate.fromAccountId == from)
+            }
+
+            val key = MerchantKey.fromTitle(transaction.title)
+            val smsId = transaction.sourceObservationId
+
+            otherHalf?.let { half ->
+                deleteTransaction(half.id)
+                half.sourceObservationId?.let { database.smsObservationDao().updateStatus(it, "MERGED") }
+            }
+            deleteTransaction(transaction.id)
+
+            recordInternal(
+                TransactionCommand(
+                    title = "Self transfer",
+                    amountMinor = transaction.amountMinor,
+                    type = TransactionCommand.Type.TRANSFER,
+                    fromAccountId = from,
+                    toAccountId = to,
+                    note = listOf(transaction.note, "Between your own accounts").filter { it.isNotBlank() }.joinToString(" · "),
+                    occurredAt = minOf(transaction.occurredAt, otherHalf?.occurredAt ?: transaction.occurredAt)
+                ),
+                smsId,
+                "POSTED"
+            )
+
+            if (remember && key != null) {
+                database.merchantRuleDao().upsert(MerchantRuleEntity(key, MerchantRuleEntity.SELF, other.id))
+            }
+        }
+    }
+
+    /**
+     * Deletes a transaction the user removed. SMS-created ones are ignored so
+     * the next import doesn't add them back.
+     */
+    suspend fun deleteTransactionByUser(transactionId: String) {
+        val smsId = database.transactionDao().getTransaction(transactionId)?.sourceObservationId
+        if (smsId != null) removeSmsTransaction(smsId) else deleteTransaction(transactionId)
+    }
+
+    private suspend fun moveCategory(transaction: FinancialTransactionEntity, categoryId: String): Boolean {
+        val old = transaction.categoryAccountId ?: return false
+        if (old == categoryId) return false
+        database.ledgerDao().moveLine(transaction.id, old, categoryId)
+        database.transactionDao().updateCategory(transaction.id, categoryId)
+        return true
+    }
+
+    /** The user acted on this SMS transaction, so a future re-map must not overwrite it. */
+    private suspend fun markChecked(smsId: String) {
+        val sms = database.smsObservationDao().getById(smsId) ?: return
+        if (sms.status == "AUTO_POSTED") database.smsObservationDao().updateStatus(smsId, "POSTED")
     }
 
     /**
@@ -244,8 +623,30 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     /** Replaces the ledger entry created from an SMS with an edited one. */
     suspend fun replaceSmsTransaction(smsId: String, command: TransactionCommand) {
         database.withTransaction {
-            database.transactionDao().getTransactionIdForSms(smsId)?.let { deleteTransaction(it) }
+            val old = database.transactionDao().getTransactionIdForSms(smsId)
+                ?.let { database.transactionDao().getTransaction(it) }
+            old?.let { deleteTransaction(it.id) }
             recordInternal(command, smsId, "POSTED")
+            old?.let { learnFromEdit(it, command) }
+        }
+    }
+
+    /** Remembers a correction so the same merchant / payee is handled right next time. */
+    private suspend fun learnFromEdit(old: FinancialTransactionEntity, new: TransactionCommand) {
+        val key = MerchantKey.fromTitle(old.title) ?: MerchantKey.fromTitle(new.title) ?: return
+        val rules = database.merchantRuleDao()
+        when {
+            (new.type == TransactionCommand.Type.EXPENSE || new.type == TransactionCommand.Type.REFUND) &&
+                    new.categoryAccountId != null && new.categoryAccountId != old.categoryAccountId ->
+                rules.upsert(MerchantRuleEntity(key, MerchantRuleEntity.CATEGORY, new.categoryAccountId))
+
+            new.type == TransactionCommand.Type.TRANSFER && old.type == "EXPENSE" &&
+                    new.fromAccountId == old.fromAccountId && new.toAccountId != null ->
+                rules.upsert(MerchantRuleEntity(key, MerchantRuleEntity.SELF, new.toAccountId))
+
+            new.type == TransactionCommand.Type.TRANSFER && old.type == "INCOME" &&
+                    new.toAccountId == old.toAccountId && new.fromAccountId != null ->
+                rules.upsert(MerchantRuleEntity(key, MerchantRuleEntity.SELF, new.fromAccountId))
         }
     }
 
@@ -300,6 +701,9 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                 AccountEntity(HOUSING_EXPENSE, "Housing", "EXPENSE", isSystem = true),
                 AccountEntity(TRANSPORT_EXPENSE, "Transport", "EXPENSE", isSystem = true),
                 AccountEntity(SHOPPING_EXPENSE, "Shopping", "EXPENSE", isSystem = true),
+                AccountEntity(BILLS_EXPENSE, "Bills & Utilities", "EXPENSE", isSystem = true),
+                AccountEntity(HEALTH_EXPENSE, "Health & Fitness", "EXPENSE", isSystem = true),
+                AccountEntity(ENTERTAINMENT_EXPENSE, "Entertainment & Subscriptions", "EXPENSE", isSystem = true),
 
                 AccountEntity(SALARY_INCOME, "Salary", "INCOME", isSystem = true),
                 AccountEntity(OTHER_INCOME, "Other Income", "INCOME", isSystem = true),
@@ -390,6 +794,15 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                     }
                 }
 
+                TransactionCommand.Type.REFUND -> {
+                    require(
+                        (to?.accountType == "ASSET" || to?.accountType == "LIABILITY") &&
+                                category?.accountType == "EXPENSE"
+                    ) {
+                        "Choose the account the refund went to and its expense category."
+                    }
+                }
+
                 TransactionCommand.Type.TRANSFER -> {
                     require(from != null && to != null) {
                         "Choose both transfer accounts."
@@ -449,6 +862,12 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                 TransactionCommand.Type.TRANSFER -> listOf(
                     line(journalId, to!!.id, debit = command.amountMinor),
                     line(journalId, from!!.id, credit = command.amountMinor)
+                )
+
+                // Money back into the account, taken off the expense category.
+                TransactionCommand.Type.REFUND -> listOf(
+                    line(journalId, to!!.id, debit = command.amountMinor),
+                    line(journalId, category!!.id, credit = command.amountMinor)
                 )
             }
 

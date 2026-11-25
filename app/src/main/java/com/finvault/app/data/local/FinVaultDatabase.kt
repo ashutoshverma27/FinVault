@@ -13,9 +13,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         FinancialTransactionEntity::class,
         JournalEntryEntity::class,
         JournalLineEntity::class,
-        SmsObservationEntity::class
+        SmsObservationEntity::class,
+        MerchantRuleEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class FinVaultDatabase : RoomDatabase() {
@@ -26,6 +27,8 @@ abstract class FinVaultDatabase : RoomDatabase() {
     abstract fun smsObservationDao(): SmsObservationDao
 
     abstract fun monthlyOverviewDao(): MonthlyOverviewDao
+
+    abstract fun merchantRuleDao(): MerchantRuleDao
 
     companion object {
 
@@ -89,6 +92,22 @@ abstract class FinVaultDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS merchant_rules (
+                        merchantKey TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        targetId TEXT NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(merchantKey)
+                    )
+                    """
+                )
+            }
+        }
+
         fun getInstance(context: Context): FinVaultDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -96,7 +115,7 @@ abstract class FinVaultDatabase : RoomDatabase() {
                     FinVaultDatabase::class.java,
                     "finvault.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }

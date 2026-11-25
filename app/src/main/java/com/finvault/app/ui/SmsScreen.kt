@@ -122,6 +122,11 @@ fun draftToCommand(draft: TransactionDraft): TransactionCommand? {
             fromAccountId = draft.fromAccountId, toAccountId = draft.toAccountId,
             note = draft.note, occurredAt = draft.occurredAt
         )
+        TransactionCommand.Type.REFUND -> TransactionCommand(
+            draft.title, amount, draft.type,
+            toAccountId = draft.fromAccountId, categoryAccountId = draft.expenseCategoryId,
+            note = draft.note, occurredAt = draft.occurredAt
+        )
     }
 }
 
@@ -432,20 +437,21 @@ private fun SmsReviewCard(
         TransactionCommand.Type.EXPENSE -> "Expense"
         TransactionCommand.Type.INCOME -> "Income"
         TransactionCommand.Type.TRANSFER -> "Transfer"
+        TransactionCommand.Type.REFUND -> "Refund"
     }
     val typeColor = typeColor(draft.type.name)
     val sign = when (draft.type) {
         TransactionCommand.Type.EXPENSE -> "−"
-        TransactionCommand.Type.INCOME -> "+"
+        TransactionCommand.Type.INCOME, TransactionCommand.Type.REFUND -> "+"
         TransactionCommand.Type.TRANSFER -> ""
     }
     val visual = when (draft.type) {
-        TransactionCommand.Type.EXPENSE -> categoryVisual(draft.expenseCategoryId)
+        TransactionCommand.Type.EXPENSE, TransactionCommand.Type.REFUND -> categoryVisual(draft.expenseCategoryId)
         TransactionCommand.Type.INCOME -> categoryVisual(draft.incomeCategoryId)
         TransactionCommand.Type.TRANSFER -> accountVisual(draft.toAccountId)
     }
     val suggestion = when (draft.type) {
-        TransactionCommand.Type.EXPENSE -> listOfNotNull(
+        TransactionCommand.Type.EXPENSE, TransactionCommand.Type.REFUND -> listOfNotNull(
             accountNames[draft.expenseCategoryId], accountNames[draft.fromAccountId]
         )
         TransactionCommand.Type.INCOME -> listOfNotNull(

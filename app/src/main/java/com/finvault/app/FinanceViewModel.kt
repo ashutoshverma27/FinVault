@@ -85,8 +85,12 @@ class FinanceViewModel(application: Application) :
             repository.seedDefaults()
             val prefs = application.getSharedPreferences("finvault_ledger", android.content.Context.MODE_PRIVATE)
             if (prefs.getInt(KEY_SMS_MAPPING_VERSION, 1) < SMS_MAPPING_VERSION) {
-                // Re-post auto-added SMS onto per-bank accounts and pair self transfers.
+                // Re-post auto-added SMS with the current rules: per-bank accounts,
+                // self-transfer pairing (incl. UPI / IMPS reference matching),
+                // duplicate alerts and refunds. Then move "General" SMS expenses
+                // that now have a recognisable merchant.
                 repository.remapAutoPostedSms()
+                repository.recategorizeGeneralSmsExpenses()
                 prefs.edit().putInt(KEY_SMS_MAPPING_VERSION, SMS_MAPPING_VERSION).apply()
             } else {
                 // Anything detected while the app was closed goes into the ledger now.
@@ -141,7 +145,30 @@ class FinanceViewModel(application: Application) :
         onResult: (Result<Unit>) -> Unit
     ) {
         viewModelScope.launch {
-            onResult(runCatching { repository.deleteTransaction(transactionId) })
+            onResult(runCatching { repository.deleteTransactionByUser(transactionId) })
+        }
+    }
+
+    /** Result is the number of transactions that moved. */
+    fun changeCategory(
+        transactionId: String,
+        categoryId: String,
+        applyToMerchant: Boolean,
+        onResult: (Result<Int>) -> Unit
+    ) {
+        viewModelScope.launch {
+            onResult(runCatching { repository.changeCategory(transactionId, categoryId, applyToMerchant) })
+        }
+    }
+
+    fun convertToOwnTransfer(
+        transactionId: String,
+        otherAccountId: String,
+        remember: Boolean,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        viewModelScope.launch {
+            onResult(runCatching { repository.convertToOwnTransfer(transactionId, otherAccountId, remember) })
         }
     }
 
@@ -206,6 +233,6 @@ class FinanceViewModel(application: Application) :
 
     private companion object {
         const val KEY_SMS_MAPPING_VERSION = "sms_mapping_version"
-        const val SMS_MAPPING_VERSION = 2
+        const val SMS_MAPPING_VERSION = 3
     }
 }

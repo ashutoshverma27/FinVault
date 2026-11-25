@@ -51,6 +51,23 @@ interface AccountDao {
         """
     )
     fun observeAccountBalances(): Flow<List<AccountBalance>>
+
+    /** Per-bank and per-card accounts created from SMS ("bank_hdfc_1234", "card_icici_9876"). */
+    @Query("SELECT * FROM accounts WHERE id LIKE 'bank|_%' ESCAPE '|' OR id LIKE 'card|_%' ESCAPE '|'")
+    suspend fun getOwnSmsAccounts(): List<AccountEntity>
+}
+
+@Dao
+interface MerchantRuleDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(rule: MerchantRuleEntity)
+
+    @Query("SELECT * FROM merchant_rules WHERE merchantKey = :key LIMIT 1")
+    suspend fun get(key: String): MerchantRuleEntity?
+
+    @Query("SELECT * FROM merchant_rules WHERE kind = :kind")
+    suspend fun getAll(kind: String): List<MerchantRuleEntity>
 }
 
 @Dao
@@ -119,6 +136,72 @@ interface TransactionDao {
         toMillis: Long
     ): List<FinancialTransactionEntity>
 
+    /** SMS transactions in the given SMS statuses that could be the other half of a movement. */
+    @Query(
+        """
+        SELECT t.* FROM financial_transactions t
+        JOIN sms_observations s ON s.id = t.sourceObservationId
+        WHERE s.status IN (:statuses)
+          AND t.type = :type
+          AND t.amountMinor = :amountMinor
+          AND t.occurredAt >= :fromMillis
+          AND t.occurredAt <= :toMillis
+        ORDER BY t.occurredAt
+        """
+    )
+    suspend fun findSmsCandidates(
+        statuses: List<String>,
+        type: String,
+        amountMinor: Long,
+        fromMillis: Long,
+        toMillis: Long
+    ): List<FinancialTransactionEntity>
+
+    /** Any transaction (manual or SMS) of these types and amount in a time window. */
+    @Query(
+        """
+        SELECT * FROM financial_transactions
+        WHERE type IN (:types)
+          AND amountMinor = :amountMinor
+          AND occurredAt >= :fromMillis
+          AND occurredAt <= :toMillis
+        ORDER BY occurredAt
+        """
+    )
+    suspend fun findByAmount(
+        types: List<String>,
+        amountMinor: Long,
+        fromMillis: Long,
+        toMillis: Long
+    ): List<FinancialTransactionEntity>
+
+    @Query(
+        """
+        SELECT * FROM financial_transactions
+        WHERE type = 'EXPENSE'
+          AND occurredAt >= :fromMillis
+          AND occurredAt <= :toMillis
+        ORDER BY occurredAt DESC
+        """
+    )
+    suspend fun getExpensesBetween(fromMillis: Long, toMillis: Long): List<FinancialTransactionEntity>
+
+    @Query("SELECT * FROM financial_transactions WHERE type IN ('EXPENSE', 'REFUND')")
+    suspend fun getSpendingTransactions(): List<FinancialTransactionEntity>
+
+    /** SMS-created expenses currently in a category (used to re-categorise "General"). */
+    @Query(
+        """
+        SELECT t.* FROM financial_transactions t
+        JOIN sms_observations s ON s.id = t.sourceObservationId
+        WHERE t.type = 'EXPENSE' AND t.categoryAccountId = :categoryId
+        """
+    )
+    suspend fun getSmsExpensesInCategory(categoryId: String): List<FinancialTransactionEntity>
+
+    @Query("UPDATE financial_transactions SET categoryAccountId = :categoryId WHERE id = :id")
+    suspend fun updateCategory(id: String, categoryId: String): Int
+
     @Query("SELECT id FROM financial_transactions WHERE sourceObservationId = :smsId LIMIT 1")
     suspend fun getTransactionIdForSms(smsId: String): String?
 
@@ -157,6 +240,18 @@ interface LedgerDao {
 
     @Query("DELETE FROM journal_entries WHERE transactionId = :transactionId")
     suspend fun deleteEntryForTransaction(transactionId: String): Int
+
+    /** Re-points one side of a transaction's journal entry, e.g. when its category changes. */
+    @Query(
+        """
+        UPDATE journal_lines SET accountId = :newAccountId
+        WHERE accountId = :oldAccountId
+          AND journalEntryId IN (
+            SELECT id FROM journal_entries WHERE transactionId = :transactionId
+          )
+        """
+    )
+    suspend fun moveLine(transactionId: String, oldAccountId: String, newAccountId: String): Int
 }
 
 @Dao

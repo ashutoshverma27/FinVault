@@ -34,8 +34,9 @@ interface MonthlyOverviewDao {
         """
         SELECT
             COALESCE(
-                SUM(CASE WHEN type = 'EXPENSE'
-                    THEN amountMinor ELSE 0 END), 0
+                SUM(CASE WHEN type = 'EXPENSE' THEN amountMinor
+                         WHEN type = 'REFUND' THEN -amountMinor
+                         ELSE 0 END), 0
             ) AS expenseMinor,
 
             COALESCE(
@@ -73,15 +74,16 @@ interface MonthlyOverviewDao {
         SELECT
             t.categoryAccountId AS categoryId,
             COALESCE(a.name, 'Uncategorised') AS categoryName,
-            COALESCE(SUM(t.amountMinor), 0) AS amountMinor
+            COALESCE(SUM(CASE WHEN t.type = 'REFUND' THEN -t.amountMinor ELSE t.amountMinor END), 0) AS amountMinor
         FROM financial_transactions t
         LEFT JOIN accounts a ON a.id = t.categoryAccountId
-        WHERE t.type = 'EXPENSE'
+        WHERE t.type IN ('EXPENSE', 'REFUND')
           AND t.occurredAt >= :startMillis
           AND t.occurredAt < :endMillis
         GROUP BY t.categoryAccountId, a.name
+        HAVING amountMinor > 0
         ORDER BY amountMinor DESC
-        LIMIT 8
+        LIMIT 12
         """
     )
     fun observeMonthlyCategories(
@@ -98,9 +100,9 @@ interface MonthlyOverviewDao {
                 'unixepoch',
                 'localtime'
             ) AS monthKey,
-            COALESCE(SUM(amountMinor), 0) AS expenseMinor
+            COALESCE(SUM(CASE WHEN type = 'REFUND' THEN -amountMinor ELSE amountMinor END), 0) AS expenseMinor
         FROM financial_transactions
-        WHERE type = 'EXPENSE'
+        WHERE type IN ('EXPENSE', 'REFUND')
           AND occurredAt >= :startMillis
           AND occurredAt < :endMillis
         GROUP BY monthKey

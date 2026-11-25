@@ -2,6 +2,7 @@ package com.finvault.app.sms
 
 import com.finvault.app.data.repository.FinVaultRepository
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -127,11 +128,118 @@ class SmsParserTest {
     }
 
     @Test
-    fun refund_isManualOnly() {
+    fun refund_isPostedAsRefundInItsCategory() {
         val sms = parsed(
             "Refund of Rs 799.00 from AMAZON has been credited to your card XX1234 on 12-11-26."
         )
-        assertTrue(sms.manualOnly)
+        assertEquals("REFUND", sms.suggestedType)
+        assertFalse(sms.manualOnly)
+        assertEquals(FinVaultRepository.CREDIT_CARD, sms.suggestedAccountId)
+        assertEquals(FinVaultRepository.SHOPPING_EXPENSE, sms.suggestedCategoryId)
+    }
+
+    @Test
+    fun failedUpiWithMoneyBack_isRefund() {
+        val sms = parsed(
+            "Your UPI txn of Rs 450.00 from A/c XX1234 failed. Amount has been reversed to your account. UPI Ref 432112345678"
+        )
+        assertEquals("REFUND", sms.suggestedType)
+        assertEquals("432112345678", sms.referenceId)
+    }
+
+    @Test
+    fun failedUpiStillPending_isRejected() {
+        assertNull(
+            SmsParser.parse("Your UPI txn of Rs 450.00 from A/c XX1234 failed. Amount will be reversed within 48 hrs.")
+        )
+    }
+
+    // ---- Categories --------------------------------------------------------------
+
+    @Test
+    fun legalEntityNames_areFood() {
+        listOf("BUNDL TECHNOLOGIES", "GROFERS INDIA", "KIRANAKART TECHNOLOGIES", "ZOMATO LTD", "RAMESH GENERAL STORE",
+            "SHREE SWEETS", "CHAI POINT", "SAGAR RATNA RESTAURANT").forEach { name ->
+            val sms = parsed("Rs.320.00 spent on HDFC Bank Card x1234 at $name on 2026-11-25:16:05:00. Avl Lmt: Rs 48,750.00")
+            assertEquals(name, FinVaultRepository.FOOD_EXPENSE, sms.suggestedCategoryId)
+        }
+    }
+
+    @Test
+    fun upiVpaHandles_areFood() {
+        val sms = parsed(
+            "Sent Rs.250.00 From HDFC Bank A/C *1234 To swiggyupi@axb On 12/11/26 Ref 432112345678 Not You? Call 18002586161"
+        )
+        assertEquals(FinVaultRepository.FOOD_EXPENSE, sms.suggestedCategoryId)
+    }
+
+    @Test
+    fun axisUpiPath_extractsMerchantAndReference() {
+        val sms = parsed(
+            "INR 250.00 debited A/c no. XX1234 12-11-26 10:00:00 UPI/P2M/432112345678/ZOMATO LTD Not you? SMS BLOCK 1234 to 919951860002 Axis Bank"
+        )
+        assertEquals("Zomato Ltd", sms.merchant)
+        assertEquals("432112345678", sms.referenceId)
+        assertEquals(FinVaultRepository.FOOD_EXPENSE, sms.suggestedCategoryId)
+    }
+
+    @Test
+    fun icici_payeeBeforeCredited_isMerchant() {
+        val sms = parsed(
+            "ICICI Bank Acct XX123 debited for Rs 250.00 on 12-Nov-26; UBER INDIA credited. UPI:432112345678. Call 18002662 for dispute."
+        )
+        assertEquals("Uber India", sms.merchant)
+        assertEquals("432112345678", sms.referenceId)
+    }
+
+    @Test
+    fun otherCategories() {
+        fun cat(name: String) = parsed("Rs.500.00 spent on HDFC Bank Card x1234 at $name on 2026-11-25. Avl Lmt: Rs 100.00").suggestedCategoryId
+        assertEquals(FinVaultRepository.ENTERTAINMENT_EXPENSE, cat("NETFLIX"))
+        assertEquals(FinVaultRepository.BILLS_EXPENSE, cat("BESCOM"))
+        assertEquals(FinVaultRepository.HEALTH_EXPENSE, cat("APOLLO PHARMACY"))
+        assertEquals(FinVaultRepository.TRANSPORT_EXPENSE, cat("INDIAN OIL"))
+    }
+
+    @Test
+    fun wordsDoNotMatchInsideOtherWords() {
+        // "tea" must not match "TEAM", "cab" must not match "CABLE".
+        val sms = parsed("Rs 300.00 debited from your a/c XX1234 at TEAM CABLES on 12-11-26. Ref 12345678")
+        assertEquals(FinVaultRepository.GENERAL_EXPENSE, sms.suggestedCategoryId)
+    }
+
+    @Test
+    fun airtelPaymentsBankBoilerplate_isNotBills() {
+        val sms = parsed("Rs 120.00 sent to RAMU from your Airtel Payments Bank a/c XX1234 on 12-11-26. Ref 123456789")
+        assertEquals(FinVaultRepository.GENERAL_EXPENSE, sms.suggestedCategoryId)
+    }
+
+    // ---- Transfers between own accounts ----------------------------------------------
+
+    @Test
+    fun bothSidesOfTransfer_shareReference() {
+        val debit = parsed("Sent Rs.10,000.00 From HDFC Bank A/C *1234 To ASHUTOSH VERMA On 12/11/26 Ref 432112345678")
+        val credit = parsed(
+            "Rs.10,000.00 credited to your A/c XX5678 on 12-11-26 by A/c linked to VPA ashutosh@okhdfc (UPI Ref No 432112345678)."
+        )
+        assertEquals("432112345678", debit.referenceId)
+        assertEquals(debit.referenceId, credit.referenceId)
+    }
+
+    @Test
+    fun impsToMaskedAccount_reportsOtherAccount() {
+        val sms = parsed("Rs 5,000.00 debited from A/c XX1234 for IMPS to A/c XX5678 on 12-11-26. IMPS Ref no 432112345678")
+        assertEquals("1234", sms.accountHint)
+        assertEquals(listOf("5678"), sms.otherAccountHints)
+        assertEquals("432112345678", sms.referenceId)
+    }
+
+    @Test
+    fun merchantKey_normalisesTitles() {
+        assertEquals("amazon", MerchantKey.fromTitle("Refund · Amazon"))
+        assertEquals("swiggy", MerchantKey.fromTitle("SWIGGY"))
+        assertNull(MerchantKey.fromTitle("UPI payment"))
+        assertNull(MerchantKey.fromTitle("paytmqr2810050501011"))
     }
 
     @Test

@@ -10,5 +10,10 @@ data class TransactionCommand(
     val note: String = "",
     val occurredAt: Long = System.currentTimeMillis()
 ) {
-    enum class Type { EXPENSE, INCOME, TRANSFER }
+    /**
+     * REFUND is money coming back for an earlier purchase. It lands in an
+     * asset or card account and reduces spending in its expense category,
+     * so it is neither income nor a transfer.
+     */
+    enum class Type { EXPENSE, INCOME, TRANSFER, REFUND }
 }

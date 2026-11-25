@@ -156,7 +156,7 @@ private fun TransactionForm(
 
     val accent = when (type) {
         TransactionCommand.Type.EXPENSE -> FvColors.Expense
-        TransactionCommand.Type.INCOME -> FvColors.Income
+        TransactionCommand.Type.INCOME, TransactionCommand.Type.REFUND -> FvColors.Income
         TransactionCommand.Type.TRANSFER -> FvColors.Transfer
     }
 
@@ -260,6 +260,15 @@ private fun TransactionForm(
                 }
             }
 
+            TransactionCommand.Type.REFUND -> {
+                ChipGroup("Category", expenseCategories, expenseCategoryId, ::categoryVisual) {
+                    expenseCategoryId = it
+                }
+                ChipGroup("Refunded to", paymentAccounts, fromAccountId, ::accountVisual) {
+                    fromAccountId = it
+                }
+            }
+
             TransactionCommand.Type.TRANSFER -> {
                 ChipGroup("From", paymentAccounts, fromAccountId, ::accountVisual) {
                     fromAccountId = it
@@ -347,6 +356,11 @@ private fun TransactionForm(
                         TransactionCommand.Type.TRANSFER -> TransactionCommand(
                             title = title.trim(), amountMinor = minor!!, type = type,
                             fromAccountId = fromAccountId, toAccountId = toAccountId,
+                            note = note, occurredAt = occurredAt
+                        )
+                        TransactionCommand.Type.REFUND -> TransactionCommand(
+                            title = title.trim(), amountMinor = minor!!, type = type,
+                            toAccountId = fromAccountId, categoryAccountId = expenseCategoryId,
                             note = note, occurredAt = occurredAt
                         )
                     }

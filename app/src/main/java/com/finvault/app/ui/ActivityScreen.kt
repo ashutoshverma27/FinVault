@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 
 package com.finvault.app.ui
 
@@ -50,13 +50,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.Switch
+import com.finvault.app.data.local.AccountEntity
 import com.finvault.app.data.local.TransactionListItem
 
 private enum class TypeFilter(val label: String, val type: String?) {
     ALL("All", null),
     EXPENSE("Expenses", "EXPENSE"),
     INCOME("Income", "INCOME"),
-    TRANSFER("Transfers", "TRANSFER")
+    TRANSFER("Transfers", "TRANSFER"),
+    REFUND("Refunds", "REFUND")
 }
 
 @Composable
@@ -143,7 +148,7 @@ fun ActivityScreen(
             item(key = "header-$date") {
                 val dayNet = items.sumOf {
                     when (it.type) {
-                        "INCOME" -> it.amountMinor
+                        "INCOME", "REFUND" -> it.amountMinor
                         "EXPENSE" -> -it.amountMinor
                         else -> 0L
                     }
@@ -183,12 +188,20 @@ fun ActivityScreen(
 fun TransactionDetailSheet(
     item: TransactionListItem,
     onDismiss: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    accounts: List<AccountEntity> = emptyList(),
+    /** (categoryId, applyToMerchant) */
+    onChangeCategory: (String, Boolean) -> Unit = { _, _ -> },
+    /** (otherAccountId, rememberPayee) */
+    onMarkOwnTransfer: (String, Boolean) -> Unit = { _, _ -> }
 ) {
     var confirmDelete by remember { mutableStateOf(false) }
+    var pickingCategory by remember { mutableStateOf(false) }
+    var pickingAccount by remember { mutableStateOf(false) }
+    var applyToMerchant by remember { mutableStateOf(true) }
     val visual = transactionVisual(item)
     val sign = when (item.type) {
-        "INCOME" -> "+"
+        "INCOME", "REFUND" -> "+"
         "EXPENSE" -> "−"
         else -> ""
     }
@@ -227,6 +240,10 @@ fun TransactionDetailSheet(
                         DetailRow("Category", item.categoryName ?: "—")
                         DetailRow("Received into", item.toName ?: "—")
                     }
+                    "REFUND" -> {
+                        DetailRow("Category", item.categoryName ?: "—")
+                        DetailRow("Refunded to", item.toName ?: "—")
+                    }
                     else -> {
                         DetailRow("From", item.fromName ?: "—")
                         DetailRow("To", item.toName ?: "—")
@@ -244,6 +261,84 @@ fun TransactionDetailSheet(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+
+            if (item.type == "EXPENSE" || item.type == "REFUND") {
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = { pickingCategory = !pickingCategory; pickingAccount = false },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) { Text("Change category") }
+                if (pickingCategory) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "Apply to all “${item.title}” transactions",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(checked = applyToMerchant, onCheckedChange = { applyToMerchant = it })
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        accounts.filter { it.accountType == "EXPENSE" }.forEach { category ->
+                            FilterChip(
+                                selected = category.id == item.categoryId,
+                                onClick = { onChangeCategory(category.id, applyToMerchant) },
+                                label = { Text(category.name) },
+                                leadingIcon = {
+                                    Icon(categoryVisual(category.id).icon, null, Modifier.size(18.dp), tint = categoryVisual(category.id).color)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (item.type == "EXPENSE" || item.type == "INCOME") {
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = { pickingAccount = !pickingAccount; pickingCategory = false },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(if (item.type == "EXPENSE") "Sent to my own account" else "Came from my own account")
+                }
+                if (pickingAccount) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "Always treat “${item.title}” as my account",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(checked = applyToMerchant, onCheckedChange = { applyToMerchant = it })
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    val ownAccounts = accounts.filter {
+                        (it.accountType == "ASSET" || it.accountType == "LIABILITY") &&
+                                it.name != item.fromName && it.name != item.toName
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        ownAccounts.forEach { account ->
+                            FilterChip(
+                                selected = false,
+                                onClick = { onMarkOwnTransfer(account.id, applyToMerchant) },
+                                label = { Text(account.name) },
+                                leadingIcon = {
+                                    Icon(accountVisual(account.id).icon, null, Modifier.size(18.dp), tint = accountVisual(account.id).color)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -272,7 +367,7 @@ fun TransactionDetailSheet(
             text = {
                 Text(
                     if (item.sourceObservationId != null)
-                        "It will be removed from your ledger and balances. The original SMS goes back to the review queue."
+                        "It will be removed from your ledger and balances, and the SMS will be ignored so it isn't added again."
                     else
                         "It will be removed from your ledger and balances. This can't be undone."
                 )

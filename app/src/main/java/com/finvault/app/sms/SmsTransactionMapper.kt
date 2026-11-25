@@ -11,7 +11,13 @@ data class SmsPosting(
     val command: TransactionCommand,
     val accounts: List<AccountEntity>,
     /** The user's own account this SMS is about (the masked a/c or card). */
-    val ownAccountId: String
+    val ownAccountId: String,
+    /** Normalised merchant / payee name, used for learned rules. */
+    val merchantKey: String? = null,
+    /** UPI / IMPS / NEFT reference. Both sides of a transfer quote the same one. */
+    val referenceId: String? = null,
+    /** Other masked account numbers in the SMS (e.g. the account the money went to). */
+    val otherAccountHints: List<String> = emptyList()
 )
 
 /** Turns a detected SMS into a ledger command using the parser's suggestions. */
@@ -96,6 +102,20 @@ object SmsTransactionMapper {
                 )
             }
 
+            TransactionCommand.Type.REFUND -> {
+                ownAccount = own(parsed.suggestedAccountId)
+                command = TransactionCommand(
+                    title = title,
+                    amountMinor = item.suggestedAmountMinor,
+                    type = type,
+                    toAccountId = ownAccount,
+                    categoryAccountId = category?.takeIf { it.startsWith("expense_") }
+                        ?: FinVaultRepository.GENERAL_EXPENSE,
+                    note = note,
+                    occurredAt = item.receivedAt
+                )
+            }
+
             TransactionCommand.Type.TRANSFER -> {
                 val destination = parsed.suggestedDestinationId
                 // A card "payment received" SMS carries the card's number; a bank debit carries the bank's.
@@ -126,7 +146,14 @@ object SmsTransactionMapper {
             }
         }
 
-        return SmsPosting(command, newAccounts, ownAccount)
+        return SmsPosting(
+            command = command,
+            accounts = newAccounts,
+            ownAccountId = ownAccount,
+            merchantKey = MerchantKey.fromMerchant(parsed.merchant),
+            referenceId = parsed.referenceId,
+            otherAccountHints = parsed.otherAccountHints
+        )
     }
 
     /** "VM-HDFCBK-S" -> "HDFC"; unknown senders fall back to the header itself. */

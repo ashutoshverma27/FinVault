@@ -160,7 +160,8 @@ private fun FinVaultApp(
         val now = YearMonth.now()
         val inMonth = transactions.filter { YearMonth.from(it.occurredAt.toLocalDate()) == now }
         MonthlySummary(
-            expenseMinor = inMonth.filter { it.type == "EXPENSE" }.sumOf { it.amountMinor },
+            expenseMinor = inMonth.filter { it.type == "EXPENSE" }.sumOf { it.amountMinor } -
+                    inMonth.filter { it.type == "REFUND" }.sumOf { it.amountMinor },
             incomeMinor = inMonth.filter { it.type == "INCOME" }.sumOf { it.amountMinor },
             investmentMinor = inMonth.filter {
                 it.type == "TRANSFER" && it.toAccountId == FinVaultRepository.INVESTMENTS
@@ -407,16 +408,35 @@ private fun FinVaultApp(
         selectedTransaction?.let { item ->
             TransactionDetailSheet(
                 item = item,
+                accounts = accounts,
                 onDismiss = { selectedTransaction = null },
                 onDelete = {
                     viewModel.deleteTransaction(item.id) { result ->
                         result.onSuccess {
                             selectedTransaction = null
-                            notify(
-                                if (item.sourceObservationId != null) "Deleted · SMS moved back to review"
-                                else "Transaction deleted"
-                            )
+                            val smsId = item.sourceObservationId
+                            if (smsId != null) {
+                                notify("Deleted · SMS ignored", "Undo") { viewModel.restoreRemovedSms(smsId) }
+                            } else {
+                                notify("Transaction deleted")
+                            }
                         }.onFailure { notify(it.message ?: "Could not delete transaction") }
+                    }
+                },
+                onChangeCategory = { categoryId, applyAll ->
+                    viewModel.changeCategory(item.id, categoryId, applyAll) { result ->
+                        result.onSuccess { count ->
+                            selectedTransaction = null
+                            notify(if (count > 1) "Moved $count transactions" else "Category updated")
+                        }.onFailure { notify(it.message ?: "Could not change category") }
+                    }
+                },
+                onMarkOwnTransfer = { accountId, remember ->
+                    viewModel.convertToOwnTransfer(item.id, accountId, remember) { result ->
+                        result.onSuccess {
+                            selectedTransaction = null
+                            notify("Recorded as a transfer between your accounts")
+                        }.onFailure { notify(it.message ?: "Could not convert to transfer") }
                     }
                 }
             )

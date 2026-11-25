@@ -24,6 +24,9 @@ import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CreditCard
 import androidx.compose.material.icons.rounded.DirectionsCar
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Movie
+import androidx.compose.material.icons.rounded.LocalHospital
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.Receipt
 import androidx.compose.material.icons.rounded.Restaurant
@@ -64,6 +67,9 @@ fun categoryVisual(categoryId: String?): Visual = when (categoryId) {
     FinVaultRepository.TRANSPORT_EXPENSE -> Visual(Icons.Rounded.DirectionsCar, FvColors.Sky)
     FinVaultRepository.SHOPPING_EXPENSE -> Visual(Icons.Rounded.ShoppingBag, FvColors.Pink)
     FinVaultRepository.HOUSING_EXPENSE -> Visual(Icons.Rounded.Home, FvColors.Purple)
+    FinVaultRepository.BILLS_EXPENSE -> Visual(Icons.Rounded.Bolt, FvColors.Amber)
+    FinVaultRepository.HEALTH_EXPENSE -> Visual(Icons.Rounded.LocalHospital, FvColors.Coral)
+    FinVaultRepository.ENTERTAINMENT_EXPENSE -> Visual(Icons.Rounded.Movie, FvColors.Blue)
     FinVaultRepository.SALARY_INCOME -> Visual(Icons.Rounded.Work, FvColors.Mint)
     FinVaultRepository.OTHER_INCOME -> Visual(Icons.Rounded.Savings, FvColors.Mint)
     else -> Visual(Icons.Rounded.Receipt, FvColors.Slate)
@@ -94,7 +100,7 @@ fun transactionVisual(item: TransactionListItem): Visual = when (item.type) {
 }
 
 fun typeColor(type: String): Color = when (type) {
-    "INCOME" -> FvColors.Income
+    "INCOME", "REFUND" -> FvColors.Income
     "EXPENSE" -> FvColors.Expense
     else -> FvColors.Transfer
 }
@@ -182,7 +188,7 @@ fun TransactionRow(
     showDate: Boolean = true
 ) {
     val (sign, color) = when (item.type) {
-        "INCOME" -> "+" to FvColors.Income
+        "INCOME", "REFUND" -> "+" to FvColors.Income
         "EXPENSE" -> "−" to MaterialTheme.colorScheme.onSurface
         else -> "" to FvColors.Transfer
     }
@@ -190,6 +196,11 @@ fun TransactionRow(
         when (item.type) {
             "TRANSFER" -> add("${item.fromName ?: "?"} → ${item.toName ?: "?"}")
             "INCOME" -> {
+                item.categoryName?.let(::add)
+                item.toName?.let(::add)
+            }
+            "REFUND" -> {
+                add("Refund")
                 item.categoryName?.let(::add)
                 item.toName?.let(::add)
             }

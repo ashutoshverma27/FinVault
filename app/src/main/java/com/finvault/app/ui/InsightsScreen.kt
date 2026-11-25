@@ -153,7 +153,7 @@ fun InsightsScreen(
             category = category,
             monthLabel = month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())),
             transactions = monthTransactions.filter {
-                it.type == "EXPENSE" && it.categoryId == category.categoryId
+                (it.type == "EXPENSE" || it.type == "REFUND") && it.categoryId == category.categoryId
             },
             onDismiss = { openCategory = null },
             onTransactionClick = {

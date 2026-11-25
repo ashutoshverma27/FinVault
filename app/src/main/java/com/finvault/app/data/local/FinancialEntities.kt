@@ -28,7 +28,8 @@ data class FinancialTransactionEntity(
     @PrimaryKey val id: String,
     val title: String,
     val amountMinor: Long,
-    // EXPENSE, INCOME, TRANSFER, ADJUSTMENT (balance correction against opening equity)
+    // EXPENSE, INCOME, TRANSFER, REFUND (reduces an expense category),
+    // ADJUSTMENT (balance correction against opening equity)
     val type: String,
     val fromAccountId: String?,
     val toAccountId: String?,
@@ -89,6 +90,27 @@ data class JournalLineEntity(
     val creditMinor: Long
 )
 
+/**
+ * Something the app learned from the user's corrections, keyed by a
+ * normalised merchant / payee name (see MerchantKey).
+ *
+ *  - CATEGORY: expenses and refunds from this merchant go to [targetId] (an expense category).
+ *  - SELF: this payee / payer is the user's own account [targetId], so money
+ *    sent to or received from them is a transfer, not spending or income.
+ */
+@Entity(tableName = "merchant_rules")
+data class MerchantRuleEntity(
+    @PrimaryKey val merchantKey: String,
+    val kind: String,
+    val targetId: String,
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        const val CATEGORY = "CATEGORY"
+        const val SELF = "SELF"
+    }
+}
+
 data class AccountBalance(
     val accountId: String,
     val name: String,
@@ -124,7 +146,8 @@ data class SmsObservationEntity(
     val manualOnly: Boolean,
 
     // NEEDS_REVIEW, AUTO_POSTED (in ledger, not yet checked), POSTED, IGNORED,
-    // MERGED (other half of a self transfer that is recorded on its partner SMS)
+    // MERGED (already recorded by another SMS: the other half of a self transfer,
+    // or a second alert for the same payment)
     val status: String = "NEEDS_REVIEW"
 )
 
