@@ -7,18 +7,24 @@ import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
 class FinVaultRepository(private val database: FinVaultDatabase) {
+
     companion object {
         const val CASH = "account_cash"
         const val BANK = "account_primary_bank"
         const val CREDIT_CARD = "account_credit_card"
+
         const val GENERAL_EXPENSE = "expense_general"
         const val FOOD_EXPENSE = "expense_food"
         const val HOUSING_EXPENSE = "expense_housing"
         const val TRANSPORT_EXPENSE = "expense_transport"
         const val SHOPPING_EXPENSE = "expense_shopping"
+
         const val SALARY_INCOME = "income_salary"
         const val OTHER_INCOME = "income_other"
+
         const val OPENING_EQUITY = "equity_opening"
+
+        const val INVESTMENTS = "account_investments"
     }
 
     fun observeBalances(): Flow<List<AccountBalance>> =
@@ -30,62 +36,123 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     fun observeAccounts(): Flow<List<AccountEntity>> =
         database.accountDao().observeAccounts()
 
+    fun observePendingSms(): Flow<List<SmsObservationEntity>> =
+        database.smsObservationDao().observePending()
+
     suspend fun seedDefaults() {
         database.accountDao().insertAccounts(
             listOf(
                 AccountEntity(CASH, "Cash Wallet", "ASSET", isSystem = true),
                 AccountEntity(BANK, "Primary Bank", "ASSET", isSystem = true),
                 AccountEntity(CREDIT_CARD, "Credit Card", "LIABILITY", isSystem = true),
+
                 AccountEntity(GENERAL_EXPENSE, "General Expense", "EXPENSE", isSystem = true),
                 AccountEntity(FOOD_EXPENSE, "Food & Dining", "EXPENSE", isSystem = true),
                 AccountEntity(HOUSING_EXPENSE, "Housing", "EXPENSE", isSystem = true),
                 AccountEntity(TRANSPORT_EXPENSE, "Transport", "EXPENSE", isSystem = true),
                 AccountEntity(SHOPPING_EXPENSE, "Shopping", "EXPENSE", isSystem = true),
+
                 AccountEntity(SALARY_INCOME, "Salary", "INCOME", isSystem = true),
                 AccountEntity(OTHER_INCOME, "Other Income", "INCOME", isSystem = true),
-                AccountEntity(OPENING_EQUITY, "Opening Balance Equity", "EQUITY", isSystem = true)
+
+                AccountEntity(OPENING_EQUITY, "Opening Balance Equity", "EQUITY", isSystem = true),
+                AccountEntity(INVESTMENTS, "Investments", "ASSET", isSystem = true)
             )
         )
     }
 
     suspend fun record(command: TransactionCommand) {
-        require(command.title.isNotBlank()) { "Description is required." }
-        require(command.amountMinor > 0) { "Amount must be greater than zero." }
+        recordInternal(command, null)
+    }
+
+    /**
+     * Posts the ledger transaction and marks the SMS as POSTED
+     * in the same database transaction.
+     */
+    suspend fun recordFromSms(
+        command: TransactionCommand,
+        smsObservationId: String
+    ) {
+        recordInternal(command, smsObservationId)
+    }
+
+    suspend fun markSmsIgnored(id: String) {
+        val updated = database.smsObservationDao()
+            .updateStatus(id, "IGNORED")
+
+        check(updated == 1) {
+            "Could not update the SMS review status."
+        }
+    }
+
+    private suspend fun recordInternal(
+        command: TransactionCommand,
+        smsObservationId: String?
+    ) {
+        require(command.title.isNotBlank()) {
+            "Description is required."
+        }
+
+        require(command.amountMinor > 0) {
+            "Amount must be greater than zero."
+        }
 
         val accountDao = database.accountDao()
         val transactionDao = database.transactionDao()
         val ledgerDao = database.ledgerDao()
+        val smsDao = database.smsObservationDao()
 
         database.withTransaction {
+
             val from = command.fromAccountId?.let {
                 accountDao.getAccount(it) ?: error("Source account not found.")
             }
+
             val to = command.toAccountId?.let {
                 accountDao.getAccount(it) ?: error("Destination account not found.")
             }
+
             val category = command.categoryAccountId?.let {
                 accountDao.getAccount(it) ?: error("Category account not found.")
             }
 
             when (command.type) {
+
                 TransactionCommand.Type.EXPENSE -> {
                     require(from != null && category?.accountType == "EXPENSE") {
                         "Choose a payment account and expense category."
                     }
-                    require(from.accountType == "ASSET" || from.accountType == "LIABILITY") {
+
+                    require(
+                        from.accountType == "ASSET" ||
+                                from.accountType == "LIABILITY"
+                    ) {
                         "Payment must come from an asset or credit-card account."
                     }
                 }
+
                 TransactionCommand.Type.INCOME -> {
-                    require(to?.accountType == "ASSET" && category?.accountType == "INCOME") {
+                    require(
+                        to?.accountType == "ASSET" &&
+                                category?.accountType == "INCOME"
+                    ) {
                         "Choose a receiving asset account and income category."
                     }
                 }
+
                 TransactionCommand.Type.TRANSFER -> {
-                    require(from != null && to != null) { "Choose both transfer accounts." }
-                    require(from.id != to.id) { "Transfer accounts must be different." }
-                    require(from.accountType in listOf("ASSET", "LIABILITY") &&
-                        to.accountType in listOf("ASSET", "LIABILITY")) {
+                    require(from != null && to != null) {
+                        "Choose both transfer accounts."
+                    }
+
+                    require(from.id != to.id) {
+                        "Transfer accounts must be different."
+                    }
+
+                    require(
+                        from.accountType in listOf("ASSET", "LIABILITY") &&
+                                to.accountType in listOf("ASSET", "LIABILITY")
+                    ) {
                         "Transfers require asset or liability accounts."
                     }
                 }
@@ -104,7 +171,8 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                     toAccountId = command.toAccountId,
                     categoryAccountId = command.categoryAccountId,
                     occurredAt = command.occurredAt,
-                    note = command.note.trim()
+                    note = command.note.trim(),
+                    sourceObservationId = smsObservationId
                 )
             )
 
@@ -117,14 +185,17 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             )
 
             val lines = when (command.type) {
+
                 TransactionCommand.Type.EXPENSE -> listOf(
                     line(journalId, category!!.id, debit = command.amountMinor),
                     line(journalId, from!!.id, credit = command.amountMinor)
                 )
+
                 TransactionCommand.Type.INCOME -> listOf(
                     line(journalId, to!!.id, debit = command.amountMinor),
                     line(journalId, category!!.id, credit = command.amountMinor)
                 )
+
                 TransactionCommand.Type.TRANSFER -> listOf(
                     line(journalId, to!!.id, debit = command.amountMinor),
                     line(journalId, from!!.id, credit = command.amountMinor)
@@ -132,8 +203,20 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             }
 
             ledgerDao.insertJournalLines(lines)
+
             check(ledgerDao.isEntryBalanced(journalId)) {
                 "Ledger validation failed: journal entry is not balanced."
+            }
+
+            if (smsObservationId != null) {
+                val updated = smsDao.updateStatus(
+                    id = smsObservationId,
+                    status = "POSTED"
+                )
+
+                check(updated == 1) {
+                    "SMS was not in the pending review queue."
+                }
             }
         }
     }

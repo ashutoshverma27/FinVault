@@ -29,10 +29,15 @@ import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val viewModel: FinanceViewModel by viewModels()
+    private val monthlyViewModel: MonthlyFinanceViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { FinVaultTheme { FinVaultApp(viewModel) } }
+        setContent {
+            FinVaultTheme {
+                FinVaultApp(viewModel, monthlyViewModel)
+            }
+        }
     }
 }
 
@@ -50,7 +55,10 @@ private fun FinVaultTheme(content: @Composable () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FinVaultApp(viewModel: FinanceViewModel) {
+private fun FinVaultApp(
+    viewModel: FinanceViewModel,
+    monthlyViewModel: MonthlyFinanceViewModel
+) {
     val balances by viewModel.balances.collectAsStateWithLifecycle()
     val transactions by viewModel.transactions.collectAsStateWithLifecycle()
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
@@ -97,6 +105,15 @@ private fun FinVaultApp(viewModel: FinanceViewModel) {
                 )
             }
             item { AccountSummary(balances) }
+            item {
+                MonthlyOverviewSection(monthlyViewModel)
+            }
+            item {
+                SmsCenterSection(
+                    viewModel = viewModel,
+                    accounts = accounts
+                )
+            }
             item {
                 Text(
                     "RECENT ACTIVITY",

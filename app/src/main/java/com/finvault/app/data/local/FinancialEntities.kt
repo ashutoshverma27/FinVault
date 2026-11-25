@@ -18,7 +18,11 @@ data class AccountEntity(
 
 @Entity(
     tableName = "financial_transactions",
-    indices = [Index("occurredAt"), Index("type")]
+    indices = [
+        Index("occurredAt"),
+        Index("type"),
+        Index(value = ["sourceObservationId"], unique = true)
+    ]
 )
 data class FinancialTransactionEntity(
     @PrimaryKey val id: String,
@@ -31,7 +35,10 @@ data class FinancialTransactionEntity(
     val categoryAccountId: String?,
     val occurredAt: Long,
     val note: String = "",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+
+    // Links an approved SMS observation to exactly one ledger transaction.
+    val sourceObservationId: String? = null
 )
 
 @Entity(
@@ -69,7 +76,10 @@ data class JournalEntryEntity(
             onDelete = ForeignKey.RESTRICT
         )
     ],
-    indices = [Index("journalEntryId"), Index("accountId")]
+    indices = [
+        Index("journalEntryId"),
+        Index("accountId")
+    ]
 )
 data class JournalLineEntity(
     @PrimaryKey val id: String,
@@ -84,4 +94,35 @@ data class AccountBalance(
     val name: String,
     val accountType: String,
     val balanceMinor: Long
+)
+
+/**
+ * Stores only SMS messages that look like financial transactions.
+ * Non-financial messages and OTP messages are not stored.
+ */
+@Entity(
+    tableName = "sms_observations",
+    indices = [
+        Index("status"),
+        Index("receivedAt")
+    ]
+)
+data class SmsObservationEntity(
+    @PrimaryKey
+    val id: String,
+
+    val sender: String,
+    val body: String,
+    val receivedAt: Long,
+
+    val suggestedAmountMinor: Long,
+    val suggestedType: String,
+    val suggestedTitle: String,
+
+    val confidence: Int,
+    val reviewNote: String,
+    val manualOnly: Boolean,
+
+    // NEEDS_REVIEW, POSTED, IGNORED
+    val status: String = "NEEDS_REVIEW"
 )
