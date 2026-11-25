@@ -123,7 +123,7 @@ data class SmsObservationEntity(
     val reviewNote: String,
     val manualOnly: Boolean,
 
-    // NEEDS_REVIEW, POSTED, IGNORED
+    // NEEDS_REVIEW, AUTO_POSTED (in ledger, not yet checked), POSTED, IGNORED
     val status: String = "NEEDS_REVIEW"
 )
 

@@ -233,11 +233,11 @@ private fun SmsReviewBanner(count: Int, onClick: () -> Unit) {
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (count == 1) "1 SMS transaction to review" else "$count SMS transactions to review",
+                    if (count == 1) "1 SMS transaction to check" else "$count SMS transactions to check",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Text(
-                    "They're not counted until you add them.",
+                    "Added automatically — tap to confirm or fix.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

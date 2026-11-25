@@ -120,6 +120,9 @@ private fun FinVaultApp(
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
     val pendingSms by viewModel.pendingSms.collectAsStateWithLifecycle()
     val pendingSmsCount by viewModel.pendingSmsCount.collectAsStateWithLifecycle()
+    val autoPostedSms by viewModel.autoPostedSms.collectAsStateWithLifecycle()
+    val autoPostedSmsCount by viewModel.autoPostedSmsCount.collectAsStateWithLifecycle()
+    val smsBadgeCount = pendingSmsCount + autoPostedSmsCount
 
     val month by monthlyViewModel.selectedMonth.collectAsStateWithLifecycle()
     val summary by monthlyViewModel.summary.collectAsStateWithLifecycle()
@@ -132,6 +135,7 @@ private fun FinVaultApp(
     var hideAmounts by rememberSaveable { mutableStateOf(false) }
     var showAddSheet by remember { mutableStateOf(false) }
     var reviewingSms by remember { mutableStateOf<SmsObservationEntity?>(null) }
+    var editingAutoSms by remember { mutableStateOf<SmsObservationEntity?>(null) }
     var selectedTransaction by remember { mutableStateOf<TransactionListItem?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -220,9 +224,9 @@ private fun FinVaultApp(
                             selected = tab == item,
                             onClick = { tab = item },
                             icon = {
-                                if (item == Tab.SMS && pendingSmsCount > 0) {
+                                if (item == Tab.SMS && smsBadgeCount > 0) {
                                     BadgedBox(badge = {
-                                        Badge { Text(if (pendingSmsCount > 99) "99+" else pendingSmsCount.toString()) }
+                                        Badge { Text(if (smsBadgeCount > 99) "99+" else smsBadgeCount.toString()) }
                                     }) {
                                         Icon(item.icon, contentDescription = item.label)
                                     }
@@ -246,7 +250,7 @@ private fun FinVaultApp(
                         balances = balances,
                         recent = transactions,
                         monthSummary = currentMonthSummary,
-                        pendingSmsCount = pendingSmsCount,
+                        pendingSmsCount = smsBadgeCount,
                         contentPadding = padding,
                         onAddTransaction = { showAddSheet = true },
                         onOpenInsights = {
@@ -282,6 +286,8 @@ private fun FinVaultApp(
                     Tab.SMS -> SmsScreen(
                         pending = pendingSms,
                         pendingCount = pendingSmsCount,
+                        autoPosted = autoPostedSms,
+                        autoPostedCount = autoPostedSmsCount,
                         accounts = accounts,
                         contentPadding = padding,
                         onReview = { reviewingSms = it },
@@ -291,7 +297,20 @@ private fun FinVaultApp(
                                     .onFailure { notify(it.message ?: "Could not add transaction") }
                             }
                         },
-                        onIgnore = ignoreSms
+                        onIgnore = ignoreSms,
+                        onConfirm = { viewModel.confirmSms(it.id) },
+                        onConfirmAll = {
+                            viewModel.confirmAllAutoPosted()
+                            notify("Marked $autoPostedSmsCount transactions as checked")
+                        },
+                        onEditAutoPosted = { editingAutoSms = it },
+                        onRemoveAutoPosted = { item ->
+                            viewModel.removeSmsTransaction(item.id) { result ->
+                                result.onSuccess {
+                                    notify("Removed from ledger", "Undo") { viewModel.restoreRemovedSms(item.id) }
+                                }.onFailure { notify(it.message ?: "Could not remove transaction") }
+                            }
+                        }
                     )
                 }
             }
@@ -340,6 +359,29 @@ private fun FinVaultApp(
                             reviewingSms = null
                             notify("Added “${command.title}” to your ledger")
                         }.onFailure { done(it.message ?: "Could not add transaction.") }
+                    }
+                }
+            )
+        }
+
+        editingAutoSms?.let { item ->
+            val details = remember(item.id) { smsDetails(item) }
+            val draft = remember(item.id) { smsDraft(item, details) }
+            TransactionSheet(
+                title = "Edit SMS transaction",
+                draft = draft,
+                accounts = accounts,
+                submitLabel = "Save",
+                autoFocusAmount = false,
+                onDismiss = { editingAutoSms = null },
+                header = { SmsReviewHeader(item, details) },
+                onSubmit = { command, done ->
+                    viewModel.replaceSmsTransaction(item.id, command) { result ->
+                        result.onSuccess {
+                            done(null)
+                            editingAutoSms = null
+                            notify("Transaction updated")
+                        }.onFailure { done(it.message ?: "Could not update transaction.") }
                     }
                 }
             )

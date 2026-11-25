@@ -3,8 +3,12 @@ package com.finvault.app.data.repository
 import androidx.room.withTransaction
 import com.finvault.app.data.local.*
 import com.finvault.app.domain.ledger.TransactionCommand
+import com.finvault.app.sms.SmsBodyCrypto
+import com.finvault.app.sms.SmsTransactionMapper
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 
 class FinVaultRepository(private val database: FinVaultDatabase) {
 
@@ -38,6 +42,58 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
 
     fun observePendingSms(): Flow<List<SmsObservationEntity>> =
         database.smsObservationDao().observePending()
+
+    fun observeAutoPostedSms(): Flow<List<SmsObservationEntity>> =
+        database.smsObservationDao().observeAutoPosted()
+
+    fun observeAutoPostedSmsCount(): Flow<Int> =
+        database.smsObservationDao().observeAutoPostedCount()
+
+    /**
+     * Adds a detected SMS straight to the ledger using the parser's suggestions.
+     * It stays in the "auto-added" list until the user confirms, edits or removes it.
+     * Returns false if the SMS needs manual input (e.g. refunds).
+     */
+    suspend fun autoPostSms(item: SmsObservationEntity): Boolean {
+        if (item.status != "NEEDS_REVIEW") return false
+        val command = SmsTransactionMapper.command(item, SmsBodyCrypto.decrypt(item.body)) ?: return false
+        return runCatching { recordInternal(command, item.id, "AUTO_POSTED") }.isSuccess
+    }
+
+    /** Auto-adds every SMS still waiting in the review queue. */
+    suspend fun autoPostPendingSms(): Int = withContext(Dispatchers.IO) {
+        database.smsObservationDao().getAllPending().count { autoPostSms(it) }
+    }
+
+    suspend fun autoPostSmsById(id: String): Boolean {
+        val item = database.smsObservationDao().getById(id) ?: return false
+        return autoPostSms(item)
+    }
+
+    /** User checked an auto-added SMS and it's correct. */
+    suspend fun confirmSms(id: String) {
+        database.smsObservationDao().updateStatus(id, "POSTED")
+    }
+
+    suspend fun confirmAllAutoPosted() {
+        database.smsObservationDao().markAllAutoPostedReviewed()
+    }
+
+    /** Removes the ledger entry created from an SMS and ignores the SMS. */
+    suspend fun removeSmsTransaction(smsId: String) {
+        database.withTransaction {
+            database.transactionDao().getTransactionIdForSms(smsId)?.let { deleteTransaction(it) }
+            database.smsObservationDao().updateStatus(smsId, "IGNORED")
+        }
+    }
+
+    /** Replaces the ledger entry created from an SMS with an edited one. */
+    suspend fun replaceSmsTransaction(smsId: String, command: TransactionCommand) {
+        database.withTransaction {
+            database.transactionDao().getTransactionIdForSms(smsId)?.let { deleteTransaction(it) }
+            recordInternal(command, smsId, "POSTED")
+        }
+    }
 
     fun observePendingSmsCount(): Flow<Int> =
         database.smsObservationDao().observePendingCount()
@@ -101,7 +157,7 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     }
 
     suspend fun record(command: TransactionCommand) {
-        recordInternal(command, null)
+        recordInternal(command, null, "POSTED")
     }
 
     /**
@@ -112,7 +168,7 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
         command: TransactionCommand,
         smsObservationId: String
     ) {
-        recordInternal(command, smsObservationId)
+        recordInternal(command, smsObservationId, "POSTED")
     }
 
     suspend fun markSmsIgnored(id: String) {
@@ -126,7 +182,8 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
 
     private suspend fun recordInternal(
         command: TransactionCommand,
-        smsObservationId: String?
+        smsObservationId: String?,
+        smsStatus: String
     ) {
         require(command.title.isNotBlank()) {
             "Description is required."
@@ -250,11 +307,11 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             if (smsObservationId != null) {
                 val updated = smsDao.updateStatus(
                     id = smsObservationId,
-                    status = "POSTED"
+                    status = smsStatus
                 )
 
                 check(updated == 1) {
-                    "SMS was not in the pending review queue."
+                    "SMS was not found."
                 }
             }
         }

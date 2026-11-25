@@ -84,6 +84,9 @@ interface TransactionDao {
     @Query("SELECT * FROM financial_transactions WHERE id = :id LIMIT 1")
     suspend fun getTransaction(id: String): FinancialTransactionEntity?
 
+    @Query("SELECT id FROM financial_transactions WHERE sourceObservationId = :smsId LIMIT 1")
+    suspend fun getTransactionIdForSms(smsId: String): String?
+
     @Query("DELETE FROM financial_transactions WHERE id = :id")
     suspend fun deleteTransaction(id: String): Int
 }
@@ -142,6 +145,25 @@ interface SmsObservationDao {
 
     @Query("SELECT COUNT(*) FROM sms_observations WHERE status = 'NEEDS_REVIEW'")
     fun observePendingCount(): Flow<Int>
+
+    @Query(
+        """
+        SELECT * FROM sms_observations
+        WHERE status = 'AUTO_POSTED'
+        ORDER BY receivedAt DESC
+        LIMIT 50
+        """
+    )
+    fun observeAutoPosted(): Flow<List<SmsObservationEntity>>
+
+    @Query("SELECT COUNT(*) FROM sms_observations WHERE status = 'AUTO_POSTED'")
+    fun observeAutoPostedCount(): Flow<Int>
+
+    @Query("UPDATE sms_observations SET status = 'POSTED' WHERE status = 'AUTO_POSTED'")
+    suspend fun markAllAutoPostedReviewed(): Int
+
+    @Query("SELECT * FROM sms_observations WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): SmsObservationEntity?
 
     @Query("SELECT * FROM sms_observations WHERE status = 'NEEDS_REVIEW'")
     suspend fun getAllPending(): List<SmsObservationEntity>

@@ -129,11 +129,17 @@ fun draftToCommand(draft: TransactionDraft): TransactionCommand? {
 fun SmsScreen(
     pending: List<SmsObservationEntity>,
     pendingCount: Int,
+    autoPosted: List<SmsObservationEntity>,
+    autoPostedCount: Int,
     accounts: List<AccountEntity>,
     contentPadding: PaddingValues,
     onReview: (SmsObservationEntity) -> Unit,
     onQuickAdd: (SmsObservationEntity, TransactionCommand) -> Unit,
-    onIgnore: (SmsObservationEntity) -> Unit
+    onIgnore: (SmsObservationEntity) -> Unit,
+    onConfirm: (SmsObservationEntity) -> Unit,
+    onConfirmAll: () -> Unit,
+    onEditAutoPosted: (SmsObservationEntity) -> Unit,
+    onRemoveAutoPosted: (SmsObservationEntity) -> Unit
 ) {
     val accountNames = remember(accounts) { accounts.associate { it.id to it.name } }
 
@@ -149,24 +155,70 @@ fun SmsScreen(
     ) {
         item { SmsStatusCard() }
 
-        item {
-            SectionHeader(
-                "To review",
-                trailing = if (pendingCount > 0) pendingCount.toString() else null
-            )
-        }
-
-        if (pending.isEmpty()) {
+        if (pending.isEmpty() && autoPosted.isEmpty()) {
             item {
                 FvCard {
                     EmptyState(
                         visual = Visual(Icons.Rounded.DoneAll, FvColors.Mint),
                         title = "All caught up",
-                        body = "New bank and card SMS will show up here for a quick check before they're added to your ledger."
+                        body = "Bank and card SMS are added to your ledger automatically. New ones show up here so you can check them."
                     )
                 }
             }
-        } else {
+        }
+
+        if (autoPosted.isNotEmpty()) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "AUTO-ADDED · $autoPostedCount",
+                            style = EyebrowStyle,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Already in your ledger and monthly totals. Check them when you like.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = onConfirmAll) { Text("Mark all checked") }
+                }
+            }
+            items(autoPosted, key = { "auto-" + it.id }) { item ->
+                SmsReviewCard(
+                    item = item,
+                    accountNames = accountNames,
+                    autoAdded = true,
+                    onReview = { onEditAutoPosted(item) },
+                    onQuickAdd = { onConfirm(item) },
+                    onIgnore = { onRemoveAutoPosted(item) }
+                )
+            }
+            if (autoPostedCount > autoPosted.size) {
+                item {
+                    Text(
+                        "Showing the latest ${autoPosted.size} of $autoPostedCount.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                }
+            }
+        }
+
+        if (pending.isNotEmpty()) {
+            item {
+                SectionHeader(
+                    "Needs your input",
+                    trailing = pendingCount.toString()
+                )
+            }
             items(pending, key = { it.id }) { item ->
                 SmsReviewCard(
                     item = item,
@@ -367,6 +419,7 @@ private fun PrivacyPoint(icon: ImageVector, text: String) {
 private fun SmsReviewCard(
     item: SmsObservationEntity,
     accountNames: Map<String, String>,
+    autoAdded: Boolean = false,
     onReview: () -> Unit,
     onQuickAdd: (TransactionCommand) -> Unit,
     onIgnore: () -> Unit
@@ -435,6 +488,7 @@ private fun SmsReviewCard(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            if (autoAdded) Pill("In ledger", FvColors.Mint, icon = Icons.Rounded.Check)
             Pill(typeLabel, typeColor)
             suggestion.forEach { Pill(it, MaterialTheme.colorScheme.onSurfaceVariant) }
             if (item.confidence < 70) Pill("Check details", FvColors.Amber, icon = Icons.Rounded.Info)
@@ -471,6 +525,22 @@ private fun SmsReviewCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (autoAdded) {
+                TextButton(onClick = onIgnore) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
+                OutlinedButton(onClick = onReview) {
+                    Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Edit")
+                }
+                Button(onClick = { onQuickAdd(TransactionCommand("", 0, TransactionCommand.Type.EXPENSE)) }) {
+                    Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Looks good")
+                }
+                return@Row
+            }
             TextButton(onClick = onIgnore) { Text("Ignore") }
             if (!item.manualOnly) {
                 OutlinedButton(onClick = onReview) {

@@ -99,11 +99,10 @@ object SmsIngestion {
         val observation =
             buildObservation(sender, body, receivedAt) ?: return
 
-        insertIfNew(
-            FinVaultDatabase.getInstance(context),
-            observation,
-            body
-        )
+        val database = FinVaultDatabase.getInstance(context)
+        if (insertIfNew(database, observation, body)) {
+            com.finvault.app.data.repository.FinVaultRepository(database).autoPostSms(observation)
+        }
     }
 
     /**

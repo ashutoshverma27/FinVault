@@ -16,6 +16,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.finvault.app.data.local.FinVaultDatabase
+import com.finvault.app.data.repository.FinVaultRepository
 import kotlinx.coroutines.CancellationException
 import java.util.concurrent.TimeUnit
 
@@ -141,12 +142,17 @@ class SmsImportWorker(
                     // Keep each worker bounded. WorkManager runs the continuation
                     // as a separate task, so a very large inbox doesn't occupy one
                     // worker execution indefinitely.
+                    // Detected transactions go straight into the ledger.
+                    FinVaultRepository(database).autoPostPendingSms()
                     enqueueContinuation()
                     return Result.success(output(readCheckpoint(), complete = false))
                 }
             }
 
             catchUpNewMessages(database)
+
+            // Detected transactions go straight into the ledger.
+            FinVaultRepository(database).autoPostPendingSms()
 
             val finalCheckpoint = readCheckpoint()
             reportProgress(finalCheckpoint, complete = true)

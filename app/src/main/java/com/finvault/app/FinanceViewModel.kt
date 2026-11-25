@@ -52,6 +52,20 @@ class FinanceViewModel(application: Application) :
             emptyList()
         )
 
+    val autoPostedSms: StateFlow<List<SmsObservationEntity>> =
+        repository.observeAutoPostedSms().stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList()
+        )
+
+    val autoPostedSmsCount: StateFlow<Int> =
+        repository.observeAutoPostedSmsCount().stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            0
+        )
+
     val pendingSmsCount: StateFlow<Int> =
         repository.observePendingSmsCount().stateIn(
             viewModelScope,
@@ -69,6 +83,8 @@ class FinanceViewModel(application: Application) :
     init {
         viewModelScope.launch {
             repository.seedDefaults()
+            // Anything detected before auto-add existed goes into the ledger now.
+            repository.autoPostPendingSms()
         }
     }
 
@@ -119,6 +135,40 @@ class FinanceViewModel(application: Application) :
     ) {
         viewModelScope.launch {
             onResult(runCatching { repository.deleteTransaction(transactionId) })
+        }
+    }
+
+    fun confirmSms(smsId: String) {
+        viewModelScope.launch { runCatching { repository.confirmSms(smsId) } }
+    }
+
+    fun confirmAllAutoPosted() {
+        viewModelScope.launch { runCatching { repository.confirmAllAutoPosted() } }
+    }
+
+    fun removeSmsTransaction(smsId: String, onResult: (Result<Unit>) -> Unit) {
+        viewModelScope.launch {
+            onResult(runCatching { repository.removeSmsTransaction(smsId) })
+        }
+    }
+
+    /** Undo for [removeSmsTransaction]: put the SMS back into the ledger. */
+    fun restoreRemovedSms(smsId: String) {
+        viewModelScope.launch {
+            runCatching {
+                repository.restoreSms(smsId)
+                repository.autoPostSmsById(smsId)
+            }
+        }
+    }
+
+    fun replaceSmsTransaction(
+        smsId: String,
+        command: TransactionCommand,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        viewModelScope.launch {
+            onResult(runCatching { repository.replaceSmsTransaction(smsId, command) })
         }
     }
 
