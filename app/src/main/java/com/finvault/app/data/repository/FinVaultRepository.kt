@@ -39,6 +39,45 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     fun observePendingSms(): Flow<List<SmsObservationEntity>> =
         database.smsObservationDao().observePending()
 
+    fun observePendingSmsCount(): Flow<Int> =
+        database.smsObservationDao().observePendingCount()
+
+    fun observeTransactionItems(): Flow<List<TransactionListItem>> =
+        database.transactionDao().observeTransactionItems(0L, Long.MAX_VALUE)
+
+    fun observeTransactionItems(startMillis: Long, endMillis: Long): Flow<List<TransactionListItem>> =
+        database.transactionDao().observeTransactionItems(startMillis, endMillis)
+
+    /**
+     * Removes a transaction and its journal entry. If it was created from an
+     * SMS, that SMS goes back to the review queue.
+     */
+    suspend fun deleteTransaction(transactionId: String) {
+        database.withTransaction {
+            val transactionDao = database.transactionDao()
+            val ledgerDao = database.ledgerDao()
+
+            val transaction = transactionDao.getTransaction(transactionId)
+                ?: error("Transaction not found.")
+
+            ledgerDao.deleteLinesForTransaction(transactionId)
+            ledgerDao.deleteEntryForTransaction(transactionId)
+
+            check(transactionDao.deleteTransaction(transactionId) == 1) {
+                "Could not delete the transaction."
+            }
+
+            transaction.sourceObservationId?.let { smsId ->
+                database.smsObservationDao().updateStatus(smsId, "NEEDS_REVIEW")
+            }
+        }
+    }
+
+    /** Undo for [markSmsIgnored]. */
+    suspend fun restoreSms(id: String) {
+        database.smsObservationDao().updateStatus(id, "NEEDS_REVIEW")
+    }
+
     suspend fun seedDefaults() {
         database.accountDao().insertAccounts(
             listOf(

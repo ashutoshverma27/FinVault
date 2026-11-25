@@ -126,3 +126,19 @@ data class SmsObservationEntity(
     // NEEDS_REVIEW, POSTED, IGNORED
     val status: String = "NEEDS_REVIEW"
 )
+
+/** A transaction joined with the display names of its accounts. */
+data class TransactionListItem(
+    val id: String,
+    val title: String,
+    val amountMinor: Long,
+    val type: String,
+    val occurredAt: Long,
+    val note: String,
+    val sourceObservationId: String?,
+    val categoryId: String?,
+    val toAccountId: String?,
+    val categoryName: String?,
+    val fromName: String?,
+    val toName: String?
+)

@@ -35,9 +35,10 @@ class IncomingSmsReceiver : BroadcastReceiver() {
                     it.messageBody.orEmpty()
                 }
 
-                val receivedAt = messages.firstOrNull()
-                    ?.timestampMillis
-                    ?: System.currentTimeMillis()
+                // The SMS provider stores the device receive time in its
+                // "date" column, not the network (SMSC) timestamp. Use the
+                // same clock so the live path and the inbox scan agree.
+                val receivedAt = System.currentTimeMillis()
 
                 SmsIngestion.storeIncoming(
                     context = appContext,

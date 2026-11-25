@@ -12,6 +12,7 @@ data class MonthlySummary(
 )
 
 data class MonthlyCategoryTotal(
+    val categoryId: String?,
     val categoryName: String,
     val amountMinor: Long
 )
@@ -70,6 +71,7 @@ interface MonthlyOverviewDao {
     @Query(
         """
         SELECT
+            t.categoryAccountId AS categoryId,
             COALESCE(a.name, 'Uncategorised') AS categoryName,
             COALESCE(SUM(t.amountMinor), 0) AS amountMinor
         FROM financial_transactions t

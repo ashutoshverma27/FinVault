@@ -51,6 +51,41 @@ interface TransactionDao {
         """
     )
     fun observeTransactions(): Flow<List<FinancialTransactionEntity>>
+
+    @Query(
+        """
+        SELECT
+            t.id AS id,
+            t.title AS title,
+            t.amountMinor AS amountMinor,
+            t.type AS type,
+            t.occurredAt AS occurredAt,
+            t.note AS note,
+            t.sourceObservationId AS sourceObservationId,
+            t.categoryAccountId AS categoryId,
+            t.toAccountId AS toAccountId,
+            c.name AS categoryName,
+            f.name AS fromName,
+            d.name AS toName
+        FROM financial_transactions t
+        LEFT JOIN accounts c ON c.id = t.categoryAccountId
+        LEFT JOIN accounts f ON f.id = t.fromAccountId
+        LEFT JOIN accounts d ON d.id = t.toAccountId
+        WHERE t.occurredAt >= :startMillis
+          AND t.occurredAt < :endMillis
+        ORDER BY t.occurredAt DESC, t.createdAt DESC
+        """
+    )
+    fun observeTransactionItems(
+        startMillis: Long,
+        endMillis: Long
+    ): Flow<List<TransactionListItem>>
+
+    @Query("SELECT * FROM financial_transactions WHERE id = :id LIMIT 1")
+    suspend fun getTransaction(id: String): FinancialTransactionEntity?
+
+    @Query("DELETE FROM financial_transactions WHERE id = :id")
+    suspend fun deleteTransaction(id: String): Int
 }
 
 @Dao
@@ -71,6 +106,19 @@ interface LedgerDao {
         """
     )
     suspend fun isEntryBalanced(entryId: String): Boolean
+
+    @Query(
+        """
+        DELETE FROM journal_lines
+        WHERE journalEntryId IN (
+            SELECT id FROM journal_entries WHERE transactionId = :transactionId
+        )
+        """
+    )
+    suspend fun deleteLinesForTransaction(transactionId: String): Int
+
+    @Query("DELETE FROM journal_entries WHERE transactionId = :transactionId")
+    suspend fun deleteEntryForTransaction(transactionId: String): Int
 }
 
 @Dao
@@ -91,6 +139,52 @@ interface SmsObservationDao {
     """
     )
     fun observePending(): Flow<List<SmsObservationEntity>>
+
+    @Query("SELECT COUNT(*) FROM sms_observations WHERE status = 'NEEDS_REVIEW'")
+    fun observePendingCount(): Flow<Int>
+
+    @Query("SELECT * FROM sms_observations WHERE status = 'NEEDS_REVIEW'")
+    suspend fun getAllPending(): List<SmsObservationEntity>
+
+    /**
+     * Candidates for content-based de-duplication. The live receiver and the
+     * inbox scan can see slightly different timestamps for the same message.
+     */
+    @Query(
+        """
+        SELECT * FROM sms_observations
+        WHERE receivedAt >= :fromMillis
+          AND receivedAt <= :toMillis
+          AND suggestedAmountMinor = :amountMinor
+        """
+    )
+    suspend fun findNearby(
+        fromMillis: Long,
+        toMillis: Long,
+        amountMinor: Long
+    ): List<SmsObservationEntity>
+
+    @Query(
+        """
+        UPDATE sms_observations
+        SET suggestedAmountMinor = :amountMinor,
+            suggestedType = :type,
+            suggestedTitle = :title,
+            confidence = :confidence,
+            reviewNote = :reviewNote,
+            manualOnly = :manualOnly
+        WHERE id = :id
+        """
+    )
+    suspend fun updateSuggestion(
+        id: String,
+        amountMinor: Long,
+        type: String,
+        title: String,
+        confidence: Int,
+        reviewNote: String,
+        manualOnly: Boolean
+    ): Int
 
     @Query(
         """

@@ -9,6 +9,7 @@ import com.finvault.app.data.local.MonthlyCategoryTotal
 import com.finvault.app.data.local.MonthlyPendingSmsSummary
 import com.finvault.app.data.local.MonthlySummary
 import com.finvault.app.data.local.MonthlyTrendRow
+import com.finvault.app.data.local.TransactionListItem
 import com.finvault.app.data.repository.FinVaultRepository
 import java.time.YearMonth
 import java.time.ZoneId
@@ -23,8 +24,11 @@ import kotlinx.coroutines.flow.SharingStarted
 class MonthlyFinanceViewModel(application: Application) :
     AndroidViewModel(application) {
 
-    private val dao =
-        FinVaultDatabase.getInstance(application).monthlyOverviewDao()
+    private val database = FinVaultDatabase.getInstance(application)
+
+    private val dao = database.monthlyOverviewDao()
+
+    private val repository = FinVaultRepository(database)
 
     private val monthFlow = MutableStateFlow(YearMonth.now())
 
@@ -98,8 +102,24 @@ class MonthlyFinanceViewModel(application: Application) :
             MonthlyPendingSmsSummary()
         )
 
+    val monthTransactions = monthFlow
+        .flatMapLatest { month ->
+            repository.observeTransactionItems(startMillis(month), endMillis(month))
+        }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList<TransactionListItem>()
+        )
+
     fun previousMonth() {
         monthFlow.value = monthFlow.value.minusMonths(1)
+    }
+
+    fun selectMonth(month: YearMonth) {
+        if (month <= YearMonth.now()) {
+            monthFlow.value = month
+        }
     }
 
     fun nextMonth() {

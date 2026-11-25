@@ -9,6 +9,7 @@ import com.finvault.app.data.local.AccountEntity
 import com.finvault.app.data.local.FinVaultDatabase
 import com.finvault.app.data.local.FinancialTransactionEntity
 import com.finvault.app.data.local.SmsObservationEntity
+import com.finvault.app.data.local.TransactionListItem
 import com.finvault.app.data.repository.FinVaultRepository
 import com.finvault.app.domain.ledger.TransactionCommand
 import com.finvault.app.sms.SmsInboxImporter
@@ -42,6 +43,20 @@ class FinanceViewModel(application: Application) :
             viewModelScope,
             SharingStarted.WhileSubscribed(5_000),
             emptyList()
+        )
+
+    val transactionItems: StateFlow<List<TransactionListItem>> =
+        repository.observeTransactionItems().stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            emptyList()
+        )
+
+    val pendingSmsCount: StateFlow<Int> =
+        repository.observePendingSmsCount().stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            0
         )
 
     val pendingSms: StateFlow<List<SmsObservationEntity>> =
@@ -95,6 +110,21 @@ class FinanceViewModel(application: Application) :
                     repository.recordFromSms(command, smsId)
                 }
             )
+        }
+    }
+
+    fun deleteTransaction(
+        transactionId: String,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        viewModelScope.launch {
+            onResult(runCatching { repository.deleteTransaction(transactionId) })
+        }
+    }
+
+    fun restoreSms(smsId: String) {
+        viewModelScope.launch {
+            runCatching { repository.restoreSms(smsId) }
         }
     }
 

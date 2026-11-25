@@ -1,37 +1,88 @@
 package com.finvault.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Insights
+import androidx.compose.material.icons.rounded.Sms
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.finvault.app.data.local.AccountBalance
-import com.finvault.app.data.local.AccountEntity
-import com.finvault.app.data.local.FinancialTransactionEntity
+import com.finvault.app.data.local.MonthlySummary
+import com.finvault.app.data.local.SmsObservationEntity
+import com.finvault.app.data.local.TransactionListItem
 import com.finvault.app.data.repository.FinVaultRepository
-import com.finvault.app.domain.ledger.TransactionCommand
-import java.math.BigDecimal
-import java.math.RoundingMode
-import java.text.NumberFormat
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.finvault.app.sms.SmsImportScheduler
+import com.finvault.app.ui.ActivityScreen
+import com.finvault.app.ui.FinVaultTheme
+import com.finvault.app.ui.HomeScreen
+import com.finvault.app.ui.InsightsScreen
+import com.finvault.app.ui.LocalHideAmounts
+import com.finvault.app.ui.SheetSecondaryButton
+import com.finvault.app.ui.SmsReviewHeader
+import com.finvault.app.ui.SmsScreen
+import com.finvault.app.ui.TransactionDetailSheet
+import com.finvault.app.ui.TransactionDraft
+import com.finvault.app.ui.TransactionSheet
+import com.finvault.app.ui.smsDetails
+import com.finvault.app.ui.smsDraft
+import com.finvault.app.ui.toLocalDate
+import java.time.YearMonth
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel: FinanceViewModel by viewModels()
     private val monthlyViewModel: MonthlyFinanceViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+        )
         super.onCreate(savedInstanceState)
         setContent {
             FinVaultTheme {
@@ -39,18 +90,23 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        // Catch up on any SMS that arrived while the live receiver couldn't run.
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            SmsImportScheduler.startOrResume(this)
+        }
+    }
 }
 
-@Composable
-private fun FinVaultTheme(content: @Composable () -> Unit) {
-    val colors = darkColorScheme(
-        primary = androidx.compose.ui.graphics.Color(0xFF8BE0C0),
-        secondary = androidx.compose.ui.graphics.Color(0xFF9CB8FF),
-        background = androidx.compose.ui.graphics.Color(0xFF0B1117),
-        surface = androidx.compose.ui.graphics.Color(0xFF151E27),
-        surfaceVariant = androidx.compose.ui.graphics.Color(0xFF202B36)
-    )
-    MaterialTheme(colorScheme = colors, content = content)
+private enum class Tab(val label: String, val title: String, val icon: ImageVector) {
+    HOME("Home", "FinVault", Icons.Rounded.Home),
+    ACTIVITY("Activity", "Activity", Icons.AutoMirrored.Rounded.ReceiptLong),
+    INSIGHTS("Insights", "Monthly overview", Icons.Rounded.Insights),
+    SMS("SMS", "SMS transactions", Icons.Rounded.Sms)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -60,383 +116,251 @@ private fun FinVaultApp(
     monthlyViewModel: MonthlyFinanceViewModel
 ) {
     val balances by viewModel.balances.collectAsStateWithLifecycle()
-    val transactions by viewModel.transactions.collectAsStateWithLifecycle()
+    val transactions by viewModel.transactionItems.collectAsStateWithLifecycle()
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
-    var showAddDialog by remember { mutableStateOf(false) }
+    val pendingSms by viewModel.pendingSms.collectAsStateWithLifecycle()
+    val pendingSmsCount by viewModel.pendingSmsCount.collectAsStateWithLifecycle()
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("FinVault", fontWeight = FontWeight.Bold)
-                        Text(
-                            "YOUR MONEY. YOUR CONTROL.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+    val month by monthlyViewModel.selectedMonth.collectAsStateWithLifecycle()
+    val summary by monthlyViewModel.summary.collectAsStateWithLifecycle()
+    val categories by monthlyViewModel.categories.collectAsStateWithLifecycle()
+    val trend by monthlyViewModel.spendingTrend.collectAsStateWithLifecycle()
+    val monthPendingSms by monthlyViewModel.pendingSmsSummary.collectAsStateWithLifecycle()
+    val monthTransactions by monthlyViewModel.monthTransactions.collectAsStateWithLifecycle()
+
+    var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
+    var hideAmounts by rememberSaveable { mutableStateOf(false) }
+    var showAddSheet by remember { mutableStateOf(false) }
+    var reviewingSms by remember { mutableStateOf<SmsObservationEntity?>(null) }
+    var selectedTransaction by remember { mutableStateOf<TransactionListItem?>(null) }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun notify(message: String, actionLabel: String? = null, onAction: (() -> Unit)? = null) {
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = actionLabel,
+                duration = SnackbarDuration.Short
             )
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showAddDialog = true },
-                text = { Text("Add transaction") },
-                icon = { Text("+") }
-            )
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 100.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            item { NetWorthCard(balances) }
-            item {
-                Text(
-                    "ACCOUNTS",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            item { AccountSummary(balances) }
-            item {
-                MonthlyOverviewSection(monthlyViewModel)
-            }
-            item {
-                SmsCenterSection(
-                    viewModel = viewModel,
-                    accounts = accounts
-                )
-            }
-            item {
-                Text(
-                    "RECENT ACTIVITY",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (transactions.isEmpty()) {
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        shape = RoundedCornerShape(20.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("Your ledger starts here", style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "Add your first income, expense or transfer. FinVault stores it on this device.",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            } else {
-                items(transactions, key = { it.id }) { TransactionRow(it) }
-            }
-            item {
-                Text(
-                    "Local database • No cloud account connected",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            if (result == SnackbarResult.ActionPerformed) onAction?.invoke()
         }
     }
 
-    if (showAddDialog) {
-        AddTransactionDialog(
-            accounts = accounts,
-            onDismiss = { showAddDialog = false },
-            onSave = { command, result ->
-                viewModel.addTransaction(command) { saveResult ->
-                    saveResult.fold(
-                        onSuccess = {
-                            result(null)
-                            showAddDialog = false
+    // "This month" on Home always means the current calendar month,
+    // independent of the month being browsed in Insights.
+    val currentMonthSummary = remember(transactions) {
+        val now = YearMonth.now()
+        val inMonth = transactions.filter { YearMonth.from(it.occurredAt.toLocalDate()) == now }
+        MonthlySummary(
+            expenseMinor = inMonth.filter { it.type == "EXPENSE" }.sumOf { it.amountMinor },
+            incomeMinor = inMonth.filter { it.type == "INCOME" }.sumOf { it.amountMinor },
+            investmentMinor = inMonth.filter {
+                it.type == "TRANSFER" && it.toAccountId == FinVaultRepository.INVESTMENTS
+            }.sumOf { it.amountMinor }
+        )
+    }
+
+    val ignoreSms: (SmsObservationEntity) -> Unit = { item ->
+        viewModel.ignoreSms(item.id) { result ->
+            result.onSuccess {
+                notify("Message ignored", "Undo") { viewModel.restoreSms(item.id) }
+            }.onFailure { notify(it.message ?: "Could not ignore message") }
+        }
+    }
+
+    CompositionLocalProvider(LocalHideAmounts provides hideAmounts) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(
+                            tab.title,
+                            style = if (tab == Tab.HOME) MaterialTheme.typography.headlineMedium
+                            else MaterialTheme.typography.headlineSmall
+                        )
+                    },
+                    actions = {
+                        IconButton(onClick = { hideAmounts = !hideAmounts }) {
+                            Icon(
+                                if (hideAmounts) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                contentDescription = if (hideAmounts) "Show amounts" else "Hide amounts"
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                        scrolledContainerColor = MaterialTheme.colorScheme.background
+                    )
+                )
+            },
+            floatingActionButton = {
+                AnimatedVisibility(
+                    visible = tab != Tab.SMS,
+                    enter = scaleIn(),
+                    exit = scaleOut()
+                ) {
+                    FloatingActionButton(
+                        onClick = { showAddSheet = true },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ) {
+                        Icon(Icons.Rounded.Add, contentDescription = "Add transaction")
+                    }
+                }
+            },
+            bottomBar = {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Tab.entries.forEach { item ->
+                        NavigationBarItem(
+                            selected = tab == item,
+                            onClick = { tab = item },
+                            icon = {
+                                if (item == Tab.SMS && pendingSmsCount > 0) {
+                                    BadgedBox(badge = {
+                                        Badge { Text(if (pendingSmsCount > 99) "99+" else pendingSmsCount.toString()) }
+                                    }) {
+                                        Icon(item.icon, contentDescription = item.label)
+                                    }
+                                } else {
+                                    Icon(item.icon, contentDescription = item.label)
+                                }
+                            },
+                            label = { Text(item.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        )
+                    }
+                }
+            }
+        ) { padding ->
+            Crossfade(targetState = tab, label = "tab") { current ->
+                when (current) {
+                    Tab.HOME -> HomeScreen(
+                        balances = balances,
+                        recent = transactions,
+                        monthSummary = currentMonthSummary,
+                        pendingSmsCount = pendingSmsCount,
+                        contentPadding = padding,
+                        onAddTransaction = { showAddSheet = true },
+                        onOpenInsights = {
+                            monthlyViewModel.selectMonth(YearMonth.now())
+                            tab = Tab.INSIGHTS
                         },
-                        onFailure = { result(it.message ?: "Could not save transaction.") }
+                        onOpenActivity = { tab = Tab.ACTIVITY },
+                        onOpenSms = { tab = Tab.SMS },
+                        onTransactionClick = { selectedTransaction = it }
+                    )
+
+                    Tab.ACTIVITY -> ActivityScreen(
+                        transactions = transactions,
+                        contentPadding = padding,
+                        onTransactionClick = { selectedTransaction = it }
+                    )
+
+                    Tab.INSIGHTS -> InsightsScreen(
+                        month = month,
+                        summary = summary,
+                        categories = categories,
+                        trend = trend,
+                        pendingSms = monthPendingSms,
+                        monthTransactions = monthTransactions,
+                        contentPadding = padding,
+                        onPreviousMonth = monthlyViewModel::previousMonth,
+                        onNextMonth = monthlyViewModel::nextMonth,
+                        onSelectMonth = monthlyViewModel::selectMonth,
+                        onOpenSms = { tab = Tab.SMS },
+                        onTransactionClick = { selectedTransaction = it }
+                    )
+
+                    Tab.SMS -> SmsScreen(
+                        pending = pendingSms,
+                        pendingCount = pendingSmsCount,
+                        accounts = accounts,
+                        contentPadding = padding,
+                        onReview = { reviewingSms = it },
+                        onQuickAdd = { item, command ->
+                            viewModel.approveSms(item.id, command) { result ->
+                                result.onSuccess { notify("Added “${command.title}” to your ledger") }
+                                    .onFailure { notify(it.message ?: "Could not add transaction") }
+                            }
+                        },
+                        onIgnore = ignoreSms
                     )
                 }
             }
-        )
-    }
-}
+        }
 
-@Composable
-private fun NetWorthCard(balances: List<AccountBalance>) {
-    val assets = balances.filter { it.accountType == "ASSET" }.sumOf { it.balanceMinor }
-    val liabilities = balances.filter { it.accountType == "LIABILITY" }.sumOf { it.balanceMinor }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(Modifier.padding(22.dp)) {
-            Text("TOTAL NET WORTH", color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                formatInr(assets - liabilities),
-                style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+        if (showAddSheet) {
+            TransactionSheet(
+                title = "New transaction",
+                draft = remember { TransactionDraft() },
+                accounts = accounts,
+                submitLabel = "Save",
+                onDismiss = { showAddSheet = false },
+                onSubmit = { command, done ->
+                    viewModel.addTransaction(command) { result ->
+                        result.onSuccess {
+                            done(null)
+                            showAddSheet = false
+                            notify("Transaction saved")
+                        }.onFailure { done(it.message ?: "Could not save transaction.") }
+                    }
+                }
             )
-            Spacer(Modifier.height(18.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Metric("Assets", formatInr(assets))
-                Metric("Liabilities", formatInr(liabilities))
-            }
         }
-    }
-}
 
-@Composable
-private fun Metric(label: String, value: String) {
-    Column {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.labelMedium)
-        Text(value, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-@Composable
-private fun AccountSummary(balances: List<AccountBalance>) {
-    val visible = balances.filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        visible.forEach { account ->
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(account.name, fontWeight = FontWeight.Medium)
-                        Text(account.accountType, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Text(formatInr(account.balanceMinor), fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TransactionRow(transaction: FinancialTransactionEntity) {
-    val sign = when (transaction.type) {
-        "INCOME" -> "+"
-        "EXPENSE" -> "−"
-        else -> ""
-    }
-    val amountColor = when (transaction.type) {
-        "INCOME" -> MaterialTheme.colorScheme.primary
-        "EXPENSE" -> MaterialTheme.colorScheme.error
-        else -> MaterialTheme.colorScheme.onSurface
-    }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(16.dp)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(15.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(transaction.title, fontWeight = FontWeight.SemiBold)
-                Text(
-                    "${transaction.type} • ${formatDate(transaction.occurredAt)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Text("$sign${formatInr(transaction.amountMinor)}",
-                color = amountColor, fontWeight = FontWeight.SemiBold)
-        }
-    }
-}
-
-@Composable
-private fun AddTransactionDialog(
-    accounts: List<AccountEntity>,
-    onDismiss: () -> Unit,
-    onSave: (TransactionCommand, (String?) -> Unit) -> Unit
-) {
-    var type by remember { mutableStateOf(TransactionCommand.Type.EXPENSE) }
-    var title by remember { mutableStateOf("") }
-    var amount by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf("") }
-    var selectedAccountId by remember { mutableStateOf(FinVaultRepository.BANK) }
-    var selectedDestinationId by remember { mutableStateOf(FinVaultRepository.CASH) }
-    var selectedCategoryId by remember { mutableStateOf(FinVaultRepository.FOOD_EXPENSE) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
-
-    val paymentAccounts = accounts.filter {
-        it.accountType == "ASSET" || it.accountType == "LIABILITY"
-    }
-    val expenseCategories = accounts.filter { it.accountType == "EXPENSE" }
-    val incomeCategories = accounts.filter { it.accountType == "INCOME" }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("New transaction") },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TransactionCommand.Type.entries.forEach { option ->
-                        FilterChip(
-                            selected = type == option,
-                            onClick = { type = option; error = null },
-                            label = {
-                                Text(option.name.lowercase().replaceFirstChar { it.uppercase() })
-                            }
-                        )
+        reviewingSms?.let { item ->
+            val details = remember(item.id) { smsDetails(item) }
+            val draft = remember(item.id) { smsDraft(item, details) }
+            TransactionSheet(
+                title = "Review SMS",
+                draft = draft,
+                accounts = accounts,
+                submitLabel = "Add to ledger",
+                autoFocusAmount = false,
+                onDismiss = { reviewingSms = null },
+                header = { SmsReviewHeader(item, details) },
+                secondaryAction = {
+                    SheetSecondaryButton("Ignore", onClick = {
+                        reviewingSms = null
+                        ignoreSms(item)
+                    })
+                },
+                onSubmit = { command, done ->
+                    viewModel.approveSms(item.id, command) { result ->
+                        result.onSuccess {
+                            done(null)
+                            reviewingSms = null
+                            notify("Added “${command.title}” to your ledger")
+                        }.onFailure { done(it.message ?: "Could not add transaction.") }
                     }
                 }
-                OutlinedTextField(
-                    value = title, onValueChange = { title = it },
-                    label = { Text("Description") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = amount, onValueChange = { amount = it; error = null },
-                    label = { Text("Amount (₹)") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                when (type) {
-                    TransactionCommand.Type.EXPENSE -> {
-                        AccountDropdown("Paid from", paymentAccounts, selectedAccountId) {
-                            selectedAccountId = it
-                        }
-                        AccountDropdown("Category", expenseCategories, selectedCategoryId) {
-                            selectedCategoryId = it
-                        }
-                    }
-                    TransactionCommand.Type.INCOME -> {
-                        AccountDropdown(
-                            "Received into", paymentAccounts.filter { it.accountType == "ASSET" },
-                            selectedAccountId
-                        ) { selectedAccountId = it }
-                        AccountDropdown("Income category", incomeCategories, selectedCategoryId) {
-                            selectedCategoryId = it
-                        }
-                    }
-                    TransactionCommand.Type.TRANSFER -> {
-                        AccountDropdown("From", paymentAccounts, selectedAccountId) {
-                            selectedAccountId = it
-                        }
-                        AccountDropdown("To", paymentAccounts, selectedDestinationId) {
-                            selectedDestinationId = it
-                        }
-                    }
-                }
-                OutlinedTextField(
-                    value = note, onValueChange = { note = it },
-                    label = { Text("Note (optional)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                error?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = !saving,
-                onClick = {
-                    val minor = parseAmount(amount)
-                    if (title.isBlank() || minor == null) {
-                        error = "Enter a description and a valid amount."
-                        return@TextButton
-                    }
-                    val command = when (type) {
-                        TransactionCommand.Type.EXPENSE -> TransactionCommand(
-                            title, minor, type, fromAccountId = selectedAccountId,
-                            categoryAccountId = selectedCategoryId, note = note
-                        )
-                        TransactionCommand.Type.INCOME -> TransactionCommand(
-                            title, minor, type, toAccountId = selectedAccountId,
-                            categoryAccountId = selectedCategoryId, note = note
-                        )
-                        TransactionCommand.Type.TRANSFER -> TransactionCommand(
-                            title, minor, type, fromAccountId = selectedAccountId,
-                            toAccountId = selectedDestinationId, note = note
-                        )
-                    }
-                    saving = true
-                    onSave(command) { message ->
-                        saving = false
-                        if (message != null) error = message
-                    }
-                }
-            ) { Text(if (saving) "Saving…" else "Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            )
         }
-    )
-}
 
-@Composable
-private fun AccountDropdown(
-    label: String,
-    options: List<AccountEntity>,
-    selectedId: String,
-    onSelected: (String) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selected = options.firstOrNull { it.id == selectedId }
-    Box {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("$label: ${selected?.name ?: "Choose"}")
-                Text("⌄")
-            }
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { account ->
-                DropdownMenuItem(
-                    text = { Text(account.name) },
-                    onClick = { onSelected(account.id); expanded = false }
-                )
-            }
+        selectedTransaction?.let { item ->
+            TransactionDetailSheet(
+                item = item,
+                onDismiss = { selectedTransaction = null },
+                onDelete = {
+                    viewModel.deleteTransaction(item.id) { result ->
+                        result.onSuccess {
+                            selectedTransaction = null
+                            notify(
+                                if (item.sourceObservationId != null) "Deleted · SMS moved back to review"
+                                else "Transaction deleted"
+                            )
+                        }.onFailure { notify(it.message ?: "Could not delete transaction") }
+                    }
+                }
+            )
         }
     }
 }
-
-private fun parseAmount(value: String): Long? = try {
-    BigDecimal(value.trim().replace(",", ""))
-        .setScale(2, RoundingMode.UNNECESSARY)
-        .movePointRight(2)
-        .longValueExact()
-        .takeIf { it > 0 }
-} catch (_: Exception) {
-    null
-}
-
-private fun formatInr(amountMinor: Long): String =
-    NumberFormat.getCurrencyInstance(Locale("en", "IN"))
-        .format(BigDecimal.valueOf(amountMinor, 2))
-
-private fun formatDate(timestamp: Long): String =
-    SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(timestamp))
