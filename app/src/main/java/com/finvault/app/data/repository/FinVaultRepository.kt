@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.finvault.app.data.local.*
 import com.finvault.app.domain.ledger.TransactionCommand
 import com.finvault.app.sms.SmsBodyCrypto
+import com.finvault.app.sms.SmsPosting
 import com.finvault.app.sms.SmsTransactionMapper
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +30,9 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
         const val OPENING_EQUITY = "equity_opening"
 
         const val INVESTMENTS = "account_investments"
+
+        private const val SELF_TRANSFER_WINDOW = 30 * 60_000L
+        private const val CARD_PAYMENT_WINDOW = 3 * 24 * 60 * 60_000L
     }
 
     fun observeBalances(): Flow<List<AccountBalance>> =
@@ -56,13 +60,163 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
      */
     suspend fun autoPostSms(item: SmsObservationEntity): Boolean {
         if (item.status != "NEEDS_REVIEW") return false
-        val command = SmsTransactionMapper.command(item, SmsBodyCrypto.decrypt(item.body)) ?: return false
-        return runCatching { recordInternal(command, item.id, "AUTO_POSTED") }.isSuccess
+        val posting = SmsTransactionMapper.posting(item, SmsBodyCrypto.decrypt(item.body)) ?: return false
+
+        return runCatching {
+            database.withTransaction {
+                database.accountDao().insertAccounts(posting.accounts)
+
+                val partner = findPartner(posting)
+                if (partner == null) {
+                    recordInternal(posting.command, item.id, "AUTO_POSTED")
+                } else {
+                    mergeWithPartner(posting, partner, item.id)
+                }
+            }
+        }.isSuccess
     }
 
-    /** Auto-adds every SMS still waiting in the review queue. */
+    /**
+     * Finds the other half of a movement between the user's own accounts:
+     *  - a debit from one own bank account + a credit of the same amount into
+     *    another own bank account within 30 minutes (self transfer), or
+     *  - the bank-side and card-side SMS of one credit card bill payment.
+     */
+    private suspend fun findPartner(posting: SmsPosting): FinancialTransactionEntity? {
+        val command = posting.command
+        val own = posting.ownAccountId
+        val dao = database.transactionDao()
+
+        return when (command.type) {
+            TransactionCommand.Type.EXPENSE, TransactionCommand.Type.INCOME -> {
+                if (!own.startsWith("bank_")) return null
+                val opposite = if (command.type == TransactionCommand.Type.EXPENSE) "INCOME" else "EXPENSE"
+                dao.findAutoPostedCandidates(
+                    opposite, command.amountMinor,
+                    command.occurredAt - SELF_TRANSFER_WINDOW, command.occurredAt + SELF_TRANSFER_WINDOW
+                ).firstOrNull { candidate ->
+                    val candidateOwn = if (opposite == "INCOME") candidate.toAccountId else candidate.fromAccountId
+                    candidateOwn != null && candidateOwn.startsWith("bank_") && candidateOwn != own
+                }
+            }
+
+            TransactionCommand.Type.TRANSFER -> {
+                if (!isCard(command.toAccountId)) return null
+                dao.findAutoPostedCandidates(
+                    "TRANSFER", command.amountMinor,
+                    command.occurredAt - CARD_PAYMENT_WINDOW, command.occurredAt + CARD_PAYMENT_WINDOW
+                ).firstOrNull { isCard(it.toAccountId) }
+            }
+        }
+    }
+
+    private suspend fun mergeWithPartner(
+        posting: SmsPosting,
+        partner: FinancialTransactionEntity,
+        smsId: String
+    ) {
+        val command = posting.command
+        val (from, to, title) = when (command.type) {
+            TransactionCommand.Type.EXPENSE -> Triple(posting.ownAccountId, partner.toAccountId!!, "Self transfer")
+            TransactionCommand.Type.INCOME -> Triple(partner.fromAccountId!!, posting.ownAccountId, "Self transfer")
+            TransactionCommand.Type.TRANSFER -> Triple(
+                // Prefer the specific bank (bank-side SMS) and specific card (card-side SMS).
+                listOfNotNull(command.fromAccountId, partner.fromAccountId).firstOrNull { it.startsWith("bank_") }
+                    ?: command.fromAccountId!!,
+                listOfNotNull(command.toAccountId, partner.toAccountId).firstOrNull { it.startsWith("card_") }
+                    ?: command.toAccountId!!,
+                "Credit card bill payment"
+            )
+        }
+
+        val partnerSmsId = partner.sourceObservationId
+        deleteTransaction(partner.id)
+        partnerSmsId?.let { database.smsObservationDao().updateStatus(it, "MERGED") }
+
+        recordInternal(
+            TransactionCommand(
+                title = title,
+                amountMinor = command.amountMinor,
+                type = TransactionCommand.Type.TRANSFER,
+                fromAccountId = from,
+                toAccountId = if (to == from) CASH else to,
+                note = "Between your own accounts · from 2 SMS",
+                occurredAt = minOf(command.occurredAt, partner.occurredAt)
+            ),
+            smsId,
+            "AUTO_POSTED"
+        )
+    }
+
+    private fun isCard(accountId: String?) =
+        accountId == CREDIT_CARD || accountId?.startsWith("card_") == true
+
+    /** Auto-adds every SMS still waiting in the review queue, oldest first so transfer pairs match. */
     suspend fun autoPostPendingSms(): Int = withContext(Dispatchers.IO) {
-        database.smsObservationDao().getAllPending().count { autoPostSms(it) }
+        database.smsObservationDao().getAllPendingOldestFirst().count { autoPostSms(it) }
+    }
+
+    /**
+     * Re-posts every auto-added (not yet user-checked) SMS with the current
+     * mapping: per-bank accounts, self-transfer pairing and card bill merging.
+     */
+    suspend fun remapAutoPostedSms(): Int = withContext(Dispatchers.IO) {
+        val dao = database.smsObservationDao()
+        database.withTransaction {
+            dao.deleteAutoPostedLines()
+            dao.deleteAutoPostedEntries()
+            dao.deleteAutoPostedTransactions()
+            dao.resetAutoPostedStatus()
+        }
+        autoPostPendingSms()
+    }
+
+    /**
+     * Sets an account's balance to what the user sees in their bank app by
+     * posting an adjustment against Opening Balance Equity. Adjustments are
+     * not income or spending, so monthly totals are unaffected.
+     */
+    suspend fun setAccountBalance(accountId: String, targetMinor: Long) {
+        database.withTransaction {
+            val account = database.accountDao().getAccount(accountId) ?: error("Account not found.")
+            val current = database.accountDao().getBalance(accountId)
+            val diff = targetMinor - current
+            if (diff == 0L) return@withTransaction
+
+            val amount = kotlin.math.abs(diff)
+            // ASSET balance = debits - credits; LIABILITY balance = credits - debits.
+            val debitAccount = when {
+                account.accountType == "ASSET" && diff > 0 -> accountId
+                account.accountType == "LIABILITY" && diff < 0 -> accountId
+                else -> OPENING_EQUITY
+            }
+            val creditAccount = if (debitAccount == accountId) OPENING_EQUITY else accountId
+
+            val transactionId = UUID.randomUUID().toString()
+            val journalId = UUID.randomUUID().toString()
+            database.transactionDao().insertTransaction(
+                FinancialTransactionEntity(
+                    id = transactionId,
+                    title = "Balance adjustment · ${account.name}",
+                    amountMinor = amount,
+                    type = "ADJUSTMENT",
+                    fromAccountId = OPENING_EQUITY,
+                    toAccountId = accountId,
+                    categoryAccountId = null,
+                    occurredAt = System.currentTimeMillis(),
+                    note = "Balance set manually"
+                )
+            )
+            database.ledgerDao().insertJournalEntry(
+                JournalEntryEntity(journalId, transactionId, "Balance adjustment")
+            )
+            database.ledgerDao().insertJournalLines(
+                listOf(
+                    line(journalId, debitAccount, debit = amount),
+                    line(journalId, creditAccount, credit = amount)
+                )
+            )
+        }
     }
 
     suspend fun autoPostSmsById(id: String): Boolean {

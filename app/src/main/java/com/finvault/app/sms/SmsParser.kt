@@ -108,6 +108,11 @@ object SmsParser {
         """(?i)(payment (?:of .{0,30})?(?:has been )?received|received (?:a )?payment|payment .{0,20}credited|thank you for (?:your )?payment).{0,80}card|card.{0,80}(payment (?:of .{0,30})?(?:has been )?received|thank you for (?:your )?payment)"""
     )
 
+    // Bank-side SMS for paying a credit card bill.
+    private val cardBillDebitPattern = Regex(
+        """(?i)((credit card|\bcc\b)\s*(bill|payment|pymt|dues|a/c)|towards .{0,40}(credit card|\bcard\b)|card (bill )?payment|payment to .{0,30}credit card|billdesk.{0,20}card)"""
+    )
+
     private val investmentPattern = Regex(
         """(?i)\b(mutual fund|mf\b|sip\b|zerodha|groww|upstox|kuvera|coin by|indmoney|paytm money|nps\b|ppf\b|etmoney|angel ?one|smallcase|bse star|nse clearing|iccl|cams|kfin)"""
     )
@@ -188,7 +193,8 @@ object SmsParser {
         val merchant = extractMerchant(message)
         val categoryId = suggestCategory(message, merchant, isCredit)
 
-        val isCardBillPayment = isCredit && cardBillPaymentPattern.containsMatchIn(message)
+        val isCardBillPayment = (isCredit && cardBillPaymentPattern.containsMatchIn(message)) ||
+                (isDebit && cardBillDebitPattern.containsMatchIn(message))
         val isAtm = isDebit && atmPattern.containsMatchIn(message)
         val isInvestment = isDebit && investmentPattern.containsMatchIn(message)
         val isSelfTransfer = selfTransferPattern.containsMatchIn(message)
@@ -236,7 +242,7 @@ object SmsParser {
             isSelfTransfer -> {
                 type = "TRANSFER"
                 accountId = FinVaultRepository.BANK
-                destinationId = FinVaultRepository.CASH
+                destinationId = FinVaultRepository.BANK
                 title = "Self transfer"
                 note = "Looks like a transfer between your own accounts. Pick the right accounts."
             }

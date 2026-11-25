@@ -137,6 +137,7 @@ private fun FinVaultApp(
     var reviewingSms by remember { mutableStateOf<SmsObservationEntity?>(null) }
     var editingAutoSms by remember { mutableStateOf<SmsObservationEntity?>(null) }
     var selectedTransaction by remember { mutableStateOf<TransactionListItem?>(null) }
+    var balanceAccount by remember { mutableStateOf<com.finvault.app.data.local.AccountBalance?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -259,7 +260,8 @@ private fun FinVaultApp(
                         },
                         onOpenActivity = { tab = Tab.ACTIVITY },
                         onOpenSms = { tab = Tab.SMS },
-                        onTransactionClick = { selectedTransaction = it }
+                        onTransactionClick = { selectedTransaction = it },
+                        onAccountClick = { balanceAccount = it }
                     )
 
                     Tab.ACTIVITY -> ActivityScreen(
@@ -382,6 +384,21 @@ private fun FinVaultApp(
                             editingAutoSms = null
                             notify("Transaction updated")
                         }.onFailure { done(it.message ?: "Could not update transaction.") }
+                    }
+                }
+            )
+        }
+
+        balanceAccount?.let { account ->
+            com.finvault.app.ui.SetBalanceDialog(
+                account = account,
+                onDismiss = { balanceAccount = null },
+                onSave = { value ->
+                    viewModel.setAccountBalance(account.accountId, value) { result ->
+                        result.onSuccess {
+                            balanceAccount = null
+                            notify("${account.name} balance updated")
+                        }.onFailure { notify(it.message ?: "Could not update balance") }
                     }
                 }
             )

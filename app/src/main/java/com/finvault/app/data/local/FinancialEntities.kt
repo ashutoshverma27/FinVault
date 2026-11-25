@@ -28,7 +28,7 @@ data class FinancialTransactionEntity(
     @PrimaryKey val id: String,
     val title: String,
     val amountMinor: Long,
-    // EXPENSE, INCOME, TRANSFER
+    // EXPENSE, INCOME, TRANSFER, ADJUSTMENT (balance correction against opening equity)
     val type: String,
     val fromAccountId: String?,
     val toAccountId: String?,
@@ -123,7 +123,8 @@ data class SmsObservationEntity(
     val reviewNote: String,
     val manualOnly: Boolean,
 
-    // NEEDS_REVIEW, AUTO_POSTED (in ledger, not yet checked), POSTED, IGNORED
+    // NEEDS_REVIEW, AUTO_POSTED (in ledger, not yet checked), POSTED, IGNORED,
+    // MERGED (other half of a self transfer that is recorded on its partner SMS)
     val status: String = "NEEDS_REVIEW"
 )
 

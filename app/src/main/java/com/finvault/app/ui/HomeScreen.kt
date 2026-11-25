@@ -30,6 +30,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,7 +55,8 @@ fun HomeScreen(
     onOpenInsights: () -> Unit,
     onOpenActivity: () -> Unit,
     onOpenSms: () -> Unit,
-    onTransactionClick: (TransactionListItem) -> Unit
+    onTransactionClick: (TransactionListItem) -> Unit,
+    onAccountClick: (AccountBalance) -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -74,8 +77,8 @@ fun HomeScreen(
 
         item { ThisMonthCard(monthSummary, onOpenInsights) }
 
-        item { SectionHeader("Accounts") }
-        item { AccountsRow(balances) }
+        item { SectionHeader("Accounts · tap to set balance") }
+        item { AccountsRow(balances, onAccountClick) }
 
         item {
             SectionHeader(
@@ -164,6 +167,9 @@ private fun NetWorthCard(balances: List<AccountBalance>) {
     val assets = balances.filter { it.accountType == "ASSET" }.sumOf { it.balanceMinor }
     val liabilities = balances.filter { it.accountType == "LIABILITY" }.sumOf { it.balanceMinor }
     val netWorth = assets - liabilities
+    val needsBalances = balances.any {
+        (it.accountType == "ASSET" && it.balanceMinor < 0) || (it.accountType == "LIABILITY" && it.balanceMinor < 0)
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -194,8 +200,17 @@ private fun NetWorthCard(balances: List<AccountBalance>) {
                 )
                 Spacer(Modifier.height(20.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    MiniStat(Modifier.weight(1f), "Assets", money(assets), FvColors.Mint)
-                    MiniStat(Modifier.weight(1f), "Liabilities", money(liabilities), FvColors.Coral)
+                    MiniStat(Modifier.weight(1f), "Bank, cash & investments", money(assets), FvColors.Mint)
+                    MiniStat(Modifier.weight(1f), "Credit card dues", money(liabilities), FvColors.Coral)
+                }
+                if (needsBalances) {
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "Balances start at ₹0, so SMS history alone can't know what's in your accounts. " +
+                                "Tap each account below and enter its current balance.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FvColors.Amber
+                    )
                 }
             }
         }
@@ -297,8 +312,17 @@ private fun ThisMonthCard(summary: MonthlySummary, onClick: () -> Unit) {
 }
 
 @Composable
-private fun AccountsRow(balances: List<AccountBalance>) {
-    val visible = balances.filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" }
+private fun AccountsRow(balances: List<AccountBalance>, onAccountClick: (AccountBalance) -> Unit) {
+    val hasSpecificAccounts = balances.any { it.accountId.startsWith("bank_") || it.accountId.startsWith("card_") }
+    val visible = balances
+        .filter { it.accountType == "ASSET" || it.accountType == "LIABILITY" }
+        // Hide the empty generic bank / card once real per-bank accounts exist.
+        .filterNot {
+            hasSpecificAccounts && it.balanceMinor == 0L &&
+                    (it.accountId == com.finvault.app.data.repository.FinVaultRepository.BANK ||
+                            it.accountId == com.finvault.app.data.repository.FinVaultRepository.CREDIT_CARD)
+        }
+        .sortedWith(compareBy({ it.accountType != "ASSET" }, { -kotlin.math.abs(it.balanceMinor) }))
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(end = 4.dp)
@@ -306,6 +330,7 @@ private fun AccountsRow(balances: List<AccountBalance>) {
         items(visible, key = { it.accountId }) { account ->
             val visual = accountVisual(account.accountId)
             Card(
+                onClick = { onAccountClick(account) },
                 modifier = Modifier.width(156.dp),
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
@@ -326,11 +351,72 @@ private fun AccountsRow(balances: List<AccountBalance>) {
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        color = if (account.accountType == "LIABILITY" && account.balanceMinor > 0) FvColors.Coral
-                        else MaterialTheme.colorScheme.onSurface
+                        color = when {
+                            account.accountType == "LIABILITY" && account.balanceMinor > 0 -> FvColors.Coral
+                            account.balanceMinor < 0 -> FvColors.Amber
+                            else -> MaterialTheme.colorScheme.onSurface
+                        }
+                    )
+                    Text(
+                        if (account.accountType == "LIABILITY") "Amount due" else "Balance",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
         }
     }
+}
+
+
+@Composable
+fun SetBalanceDialog(
+    account: AccountBalance,
+    onDismiss: () -> Unit,
+    onSave: (Long) -> Unit
+) {
+    var text by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(
+            if (account.balanceMinor > 0) amountForInput(account.balanceMinor) else ""
+        )
+    }
+    var error by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+    val isCard = account.accountType == "LIABILITY"
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(account.name) },
+        text = {
+            Column {
+                Text(
+                    if (isCard) "Enter the current outstanding amount on this card (as shown in your card app). Enter 0 if fully paid."
+                    else "Enter the current balance shown in your bank app. Your past transactions stay as they are; FinVault adds a balance adjustment (not counted as income or spending).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it; error = null },
+                    prefix = { Text("₹ ") },
+                    label = { Text(if (isCard) "Amount due" else "Current balance") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
+                    )
+                )
+                error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                val trimmed = text.trim()
+                val value = if (trimmed == "0" || trimmed.isEmpty()) 0L else parseAmountInput(trimmed)
+                if (value == null) error = "Enter a valid amount." else onSave(value)
+            }) { Text("Save") }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }

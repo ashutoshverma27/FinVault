@@ -20,6 +20,21 @@ interface AccountDao {
 
     @Query(
         """
+        SELECT CASE
+            WHEN a.accountType IN ('ASSET', 'EXPENSE')
+                THEN COALESCE(SUM(j.debitMinor - j.creditMinor), 0)
+            ELSE COALESCE(SUM(j.creditMinor - j.debitMinor), 0)
+        END
+        FROM accounts a
+        LEFT JOIN journal_lines j ON j.accountId = a.id
+        WHERE a.id = :id
+        GROUP BY a.id
+        """
+    )
+    suspend fun getBalance(id: String): Long
+
+    @Query(
+        """
         SELECT
             a.id AS accountId,
             a.name AS name,
@@ -83,6 +98,26 @@ interface TransactionDao {
 
     @Query("SELECT * FROM financial_transactions WHERE id = :id LIMIT 1")
     suspend fun getTransaction(id: String): FinancialTransactionEntity?
+
+    /** Auto-added SMS transactions that might be the other half of a self transfer. */
+    @Query(
+        """
+        SELECT t.* FROM financial_transactions t
+        JOIN sms_observations s ON s.id = t.sourceObservationId
+        WHERE s.status = 'AUTO_POSTED'
+          AND t.type = :type
+          AND t.amountMinor = :amountMinor
+          AND t.occurredAt >= :fromMillis
+          AND t.occurredAt <= :toMillis
+        ORDER BY t.occurredAt
+        """
+    )
+    suspend fun findAutoPostedCandidates(
+        type: String,
+        amountMinor: Long,
+        fromMillis: Long,
+        toMillis: Long
+    ): List<FinancialTransactionEntity>
 
     @Query("SELECT id FROM financial_transactions WHERE sourceObservationId = :smsId LIMIT 1")
     suspend fun getTransactionIdForSms(smsId: String): String?
@@ -164,6 +199,46 @@ interface SmsObservationDao {
 
     @Query("SELECT * FROM sms_observations WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): SmsObservationEntity?
+
+    @Query("SELECT * FROM sms_observations WHERE status = 'NEEDS_REVIEW' ORDER BY receivedAt ASC")
+    suspend fun getAllPendingOldestFirst(): List<SmsObservationEntity>
+
+    // ---- One-time re-mapping of auto-added SMS (user-checked ones are left alone) ----
+
+    @Query(
+        """
+        DELETE FROM journal_lines WHERE journalEntryId IN (
+            SELECT je.id FROM journal_entries je
+            JOIN financial_transactions t ON t.id = je.transactionId
+            JOIN sms_observations s ON s.id = t.sourceObservationId
+            WHERE s.status = 'AUTO_POSTED'
+        )
+        """
+    )
+    suspend fun deleteAutoPostedLines(): Int
+
+    @Query(
+        """
+        DELETE FROM journal_entries WHERE transactionId IN (
+            SELECT t.id FROM financial_transactions t
+            JOIN sms_observations s ON s.id = t.sourceObservationId
+            WHERE s.status = 'AUTO_POSTED'
+        )
+        """
+    )
+    suspend fun deleteAutoPostedEntries(): Int
+
+    @Query(
+        """
+        DELETE FROM financial_transactions WHERE sourceObservationId IN (
+            SELECT id FROM sms_observations WHERE status = 'AUTO_POSTED'
+        )
+        """
+    )
+    suspend fun deleteAutoPostedTransactions(): Int
+
+    @Query("UPDATE sms_observations SET status = 'NEEDS_REVIEW' WHERE status IN ('AUTO_POSTED', 'MERGED')")
+    suspend fun resetAutoPostedStatus(): Int
 
     @Query("SELECT * FROM sms_observations WHERE status = 'NEEDS_REVIEW'")
     suspend fun getAllPending(): List<SmsObservationEntity>

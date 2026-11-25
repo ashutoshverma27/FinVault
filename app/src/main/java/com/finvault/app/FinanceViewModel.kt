@@ -83,8 +83,15 @@ class FinanceViewModel(application: Application) :
     init {
         viewModelScope.launch {
             repository.seedDefaults()
-            // Anything detected before auto-add existed goes into the ledger now.
-            repository.autoPostPendingSms()
+            val prefs = application.getSharedPreferences("finvault_ledger", android.content.Context.MODE_PRIVATE)
+            if (prefs.getInt(KEY_SMS_MAPPING_VERSION, 1) < SMS_MAPPING_VERSION) {
+                // Re-post auto-added SMS onto per-bank accounts and pair self transfers.
+                repository.remapAutoPostedSms()
+                prefs.edit().putInt(KEY_SMS_MAPPING_VERSION, SMS_MAPPING_VERSION).apply()
+            } else {
+                // Anything detected while the app was closed goes into the ledger now.
+                repository.autoPostPendingSms()
+            }
         }
     }
 
@@ -135,6 +142,12 @@ class FinanceViewModel(application: Application) :
     ) {
         viewModelScope.launch {
             onResult(runCatching { repository.deleteTransaction(transactionId) })
+        }
+    }
+
+    fun setAccountBalance(accountId: String, balanceMinor: Long, onResult: (Result<Unit>) -> Unit) {
+        viewModelScope.launch {
+            onResult(runCatching { repository.setAccountBalance(accountId, balanceMinor) })
         }
     }
 
@@ -189,5 +202,10 @@ class FinanceViewModel(application: Application) :
                 }
             )
         }
+    }
+
+    private companion object {
+        const val KEY_SMS_MAPPING_VERSION = "sms_mapping_version"
+        const val SMS_MAPPING_VERSION = 2
     }
 }

@@ -69,7 +69,13 @@ fun categoryVisual(categoryId: String?): Visual = when (categoryId) {
     else -> Visual(Icons.Rounded.Receipt, FvColors.Slate)
 }
 
-fun accountVisual(accountId: String?): Visual = when (accountId) {
+fun accountVisual(accountId: String?): Visual = when {
+    accountId?.startsWith("bank_") == true -> Visual(Icons.Rounded.AccountBalance, FvColors.Blue)
+    accountId?.startsWith("card_") == true -> Visual(Icons.Rounded.CreditCard, FvColors.Coral)
+    else -> genericAccountVisual(accountId)
+}
+
+private fun genericAccountVisual(accountId: String?): Visual = when (accountId) {
     FinVaultRepository.CASH -> Visual(Icons.Rounded.Payments, FvColors.Amber)
     FinVaultRepository.BANK -> Visual(Icons.Rounded.AccountBalance, FvColors.Blue)
     FinVaultRepository.CREDIT_CARD -> Visual(Icons.Rounded.CreditCard, FvColors.Coral)

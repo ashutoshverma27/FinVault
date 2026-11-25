@@ -1,4 +1,18 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.finvault.app.ui
+
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -65,6 +79,9 @@ fun InsightsScreen(
     val trendByMonth = trend.associate { it.monthKey to it.expenseMinor }
     val chartMonths = (5 downTo 0).map { month.minusMonths(it.toLong()) }
     val previousExpense = trendByMonth[month.minusMonths(1).toString()] ?: 0L
+    var sort by rememberSaveable { mutableStateOf(TransactionSort.NEWEST) }
+    var openCategory by remember { mutableStateOf<MonthlyCategoryTotal?>(null) }
+    val sortedTransactions = remember(monthTransactions, sort) { sort.apply(monthTransactions) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -86,7 +103,7 @@ fun InsightsScreen(
             item { PendingSmsCard(pendingSms, onOpenSms) }
         }
 
-        item { CategoryCard(categories, summary.expenseMinor) }
+        item { CategoryCard(categories, summary.expenseMinor, onCategoryClick = { openCategory = it }) }
 
         item {
             TrendCard(
@@ -104,6 +121,10 @@ fun InsightsScreen(
             )
         }
 
+        if (monthTransactions.isNotEmpty()) {
+            item { SortChips(sort) { sort = it } }
+        }
+
         if (monthTransactions.isEmpty()) {
             item {
                 FvCard {
@@ -119,7 +140,108 @@ fun InsightsScreen(
         } else {
             item {
                 FvCard(contentPadding = 8.dp) {
-                    monthTransactions.forEach { item ->
+                    sortedTransactions.forEach { item ->
+                        TransactionRow(item, onClick = { onTransactionClick(item) })
+                    }
+                }
+            }
+        }
+    }
+
+    openCategory?.let { category ->
+        CategoryTransactionsSheet(
+            category = category,
+            monthLabel = month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())),
+            transactions = monthTransactions.filter {
+                it.type == "EXPENSE" && it.categoryId == category.categoryId
+            },
+            onDismiss = { openCategory = null },
+            onTransactionClick = {
+                openCategory = null
+                onTransactionClick(it)
+            }
+        )
+    }
+}
+
+enum class TransactionSort(val label: String) {
+    NEWEST("Newest"),
+    OLDEST("Oldest"),
+    HIGHEST("Highest"),
+    LOWEST("Lowest");
+
+    fun apply(items: List<TransactionListItem>): List<TransactionListItem> = when (this) {
+        NEWEST -> items.sortedByDescending { it.occurredAt }
+        OLDEST -> items.sortedBy { it.occurredAt }
+        HIGHEST -> items.sortedWith(compareByDescending<TransactionListItem> { it.amountMinor }.thenByDescending { it.occurredAt })
+        LOWEST -> items.sortedWith(compareBy<TransactionListItem> { it.amountMinor }.thenByDescending { it.occurredAt })
+    }
+}
+
+@Composable
+fun SortChips(selected: TransactionSort, onSelect: (TransactionSort) -> Unit) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(TransactionSort.entries) { option ->
+            FilterChip(
+                selected = option == selected,
+                onClick = { onSelect(option) },
+                label = { Text(option.label) },
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun CategoryTransactionsSheet(
+    category: MonthlyCategoryTotal,
+    monthLabel: String,
+    transactions: List<TransactionListItem>,
+    onDismiss: () -> Unit,
+    onTransactionClick: (TransactionListItem) -> Unit
+) {
+    var sort by rememberSaveable { mutableStateOf(TransactionSort.HIGHEST) }
+    val sorted = remember(transactions, sort) { sort.apply(transactions) }
+    val visual = categoryVisual(category.categoryId)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconBadge(visual, size = 48.dp, iconSize = 24.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(category.categoryName, style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "$monthLabel · ${transactions.size} transactions",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(money(category.amountMinor), style = MaterialTheme.typography.titleLarge, color = visual.color)
+                }
+            }
+            item { SortChips(sort) { sort = it } }
+            item {
+                FvCard(contentPadding = 8.dp) {
+                    if (sorted.isEmpty()) {
+                        Text(
+                            "No transactions.",
+                            modifier = Modifier.padding(12.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    sorted.forEach { item ->
                         TransactionRow(item, onClick = { onTransactionClick(item) })
                     }
                 }
@@ -248,9 +370,13 @@ private fun PendingSmsCard(pending: MonthlyPendingSmsSummary, onOpenSms: () -> U
 }
 
 @Composable
-private fun CategoryCard(categories: List<MonthlyCategoryTotal>, totalExpense: Long) {
+private fun CategoryCard(
+    categories: List<MonthlyCategoryTotal>,
+    totalExpense: Long,
+    onCategoryClick: (MonthlyCategoryTotal) -> Unit
+) {
     FvCard {
-        Text("WHERE IT WENT", style = EyebrowStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("WHERE IT WENT · TAP TO SEE", style = EyebrowStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(14.dp))
 
         if (categories.isEmpty() || totalExpense <= 0L) {
@@ -289,7 +415,9 @@ private fun CategoryCard(categories: List<MonthlyCategoryTotal>, totalExpense: L
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 7.dp),
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onCategoryClick(category) }
+                    .padding(vertical = 7.dp, horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconBadge(visual, size = 36.dp, iconSize = 18.dp)
