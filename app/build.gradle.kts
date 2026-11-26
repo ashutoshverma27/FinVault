@@ -54,6 +54,11 @@ dependencies {
 
     implementation("androidx.work:work-runtime-ktx:2.12.0")
 
+    // Gmail read-only sign-in (AuthorizationClient) and CAS PDF reading.
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+
     val roomVersion = "2.8.5"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")

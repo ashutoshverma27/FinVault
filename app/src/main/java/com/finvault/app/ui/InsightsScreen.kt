@@ -105,6 +105,8 @@ fun InsightsScreen(
 
         item { CategoryCard(categories, summary.expenseMinor, onCategoryClick = { openCategory = it }) }
 
+        item { PaymentAccountCard(monthTransactions) }
+
         item {
             TrendCard(
                 months = chartMonths,
@@ -368,6 +370,62 @@ private fun PendingSmsCard(pending: MonthlyPendingSmsSummary, onOpenSms: () -> U
         }
     }
 }
+
+/** Net spending this month per card / bank account (expenses minus refunds). */
+@Composable
+private fun PaymentAccountCard(transactions: List<TransactionListItem>) {
+    data class Row3(val id: String?, val name: String, val amount: Long)
+    val rows = remember(transactions) {
+        transactions.filter { it.type == "EXPENSE" || it.type == "REFUND" }
+            .groupBy { if (it.type == "EXPENSE") it.fromAccountId to it.fromName else it.toAccountId to it.toName }
+            .map { (key, items) ->
+                Row3(key.first, key.second ?: "Unknown", items.sumOf { if (it.type == "EXPENSE") it.amountMinor else -it.amountMinor })
+            }
+            .filter { it.amount > 0 }
+            .sortedByDescending { it.amount }
+    }
+    if (rows.isEmpty()) return
+    val total = rows.sumOf { it.amount }.coerceAtLeast(1)
+    val cardTotal = rows.filter { isCardAccount(it.id) }.sumOf { it.amount }
+
+    FvCard {
+        Text("SPENT BY CARD / ACCOUNT", style = EyebrowStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Credit cards ${money(cardTotal)} · Bank & cash ${money(total - cardTotal)}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(12.dp))
+        rows.forEach { row ->
+            val visual = accountVisual(row.id)
+            val share = row.amount.toFloat() / total
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconBadge(visual, size = 36.dp, iconSize = 18.dp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            row.name + if (isCardAccount(row.id)) " · Credit card" else "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(money(row.amount), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    ProgressTrack(fraction = share, color = visual.color, height = 6.dp, modifier = Modifier.fillMaxWidth())
+                }
+            }
+        }
+    }
+}
+
+private fun isCardAccount(id: String?) =
+    id == com.finvault.app.data.repository.FinVaultRepository.CREDIT_CARD || id?.startsWith("card_") == true
 
 @Composable
 private fun CategoryCard(

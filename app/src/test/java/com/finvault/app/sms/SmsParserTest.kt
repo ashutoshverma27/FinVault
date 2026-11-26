@@ -322,4 +322,68 @@ class SmsParserTest {
     fun casualChat_isRejected() {
         assertNull(SmsParser.parse("I paid 500 for the movie tickets, send me later"))
     }
+
+    @Test
+    fun hdfcSentToOwnName_andKotakReceivedFromOwnName() {
+        val sent = parsed(
+            "Sent Rs.2100.00\nFrom HDFC Bank A/C *2397\nTo ASHUTOSH VERMA\nOn 25/11/26\nRef 544462711967\n" +
+                    "Not You?\nCall 18002586161/SMS BLOCK UPI to 7308080808\n"
+        )
+        assertEquals(210_000L, sent.amountMinor)
+        assertEquals("EXPENSE", sent.suggestedType)
+        assertEquals("2397", sent.accountHint)
+        assertEquals("544462711967", sent.referenceId)
+        assertEquals("ashutoshverma", MerchantKey.fromMerchant(sent.merchant))
+
+        val received = parsed(
+            "Received Rs.5000.00 in your Kotak Bank AC 8752 from ASHUTOSH VERMA on 19-11-26.UPI Ref:200910414853"
+        )
+        assertEquals(500_000L, received.amountMinor)
+        assertEquals("INCOME", received.suggestedType)
+        assertEquals("8752", received.accountHint)
+        assertEquals("200910414853", received.referenceId)
+        assertEquals("ashutoshverma", MerchantKey.fromMerchant(received.merchant))
+    }
+
+    @Test
+    fun ownerName_matchesBankVariants() {
+        val me = "Ashutosh Verma"
+        listOf("ASHUTOSH VERMA", "Mr ASHUTOSH VERMA", "ASHUTOSH V", "ASHUTOSH VERM", "VERMA ASHUTOSH", "ashutoshverma@okhdfc")
+            .forEach { assertTrue(it, MerchantKey.isOwnerName(it, me)) }
+        listOf("ASHUTOSH KUMAR", "RAHUL VERMA", "ASHU", "Zomato")
+            .forEach { assertFalse(it, MerchantKey.isOwnerName(it, me)) }
+    }
+
+    @Test
+    fun ownNameIsExtractedAcrossBankFormats() {
+        val me = "Ashutosh Verma"
+        listOf(
+            "Dear UPI user A/C X1234 debited by 500.0 on date 12Nov26 trf to ASHUTOSH VERMA Refno 432112345678. -SBI",
+            "ICICI Bank Acct XX123 debited for Rs 500.00 on 12-Nov-26; ASHUTOSH VERMA credited. UPI:432112345678.",
+            "INR 500.00 debited A/c no. XX1234 12-11-26 10:00:00 UPI/P2A/432112345678/ASHUTOSH V Not you? Axis Bank",
+            "Rs.500.00 credited to your A/c XX1234 on 12-11-26 by A/c linked to VPA ashutoshverma@okicici (UPI Ref No 432112345678)."
+        ).forEach { body ->
+            assertTrue(body, MerchantKey.isOwnerName(parsed(body).merchant, me))
+        }
+    }
+
+    @Test
+    fun debitCardSpend_isBankNotCreditCard() {
+        val sms = parsed("Rs.450.00 spent using HDFC Bank Debit Card xx1234 at DMART on 12-11-26. Avl bal: Rs 10,000.00")
+        assertEquals(FinVaultRepository.BANK, sms.suggestedAccountId)
+    }
+
+    @Test
+    fun creditCardSpendWithLimit_isCreditCard() {
+        val sms = parsed("INR 999.00 spent on ICICI Bank Card XX9876 on 12-Nov-26 at AMAZON. Avl Limit: INR 1,20,000.00")
+        assertEquals(FinVaultRepository.CREDIT_CARD, sms.suggestedAccountId)
+        assertEquals("9876", sms.accountHint)
+    }
+
+    @Test
+    fun upiOnRupayCreditCard_isCreditCard() {
+        val sms = parsed("Rs 250.00 debited from your HDFC Bank RuPay Credit Card XX4455 to swiggy@icici on 12-11-26. UPI Ref 432112345678")
+        assertEquals(FinVaultRepository.CREDIT_CARD, sms.suggestedAccountId)
+        assertEquals(FinVaultRepository.FOOD_EXPENSE, sms.suggestedCategoryId)
+    }
 }

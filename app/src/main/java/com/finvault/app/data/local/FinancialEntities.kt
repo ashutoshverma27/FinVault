@@ -108,6 +108,8 @@ data class MerchantRuleEntity(
     companion object {
         const val CATEGORY = "CATEGORY"
         const val SELF = "SELF"
+        /** [merchantKey] is the user's own name: money to / from it is always a transfer. */
+        const val OWNER = "OWNER"
     }
 }
 
@@ -151,6 +153,29 @@ data class SmsObservationEntity(
     val status: String = "NEEDS_REVIEW"
 )
 
+/**
+ * One mutual fund scheme or stock from a CAS statement. Units come from the
+ * latest imported CAS; [price] is refreshed daily (AMFI NAV / NSE close).
+ */
+@Entity(tableName = "holdings")
+data class HoldingEntity(
+    /** "MF_<ISIN>" or "STOCK_<ISIN>" */
+    @PrimaryKey val id: String,
+    val isin: String,
+    val name: String,
+    /** MF or STOCK */
+    val assetType: String,
+    val units: Double,
+    val price: Double,
+    /** Date of [price] as printed by the source, e.g. "25-Nov-2026". */
+    val priceDate: String,
+    /** Where the units came from, e.g. "CAMS CAS", "CDSL CAS". */
+    val source: String,
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    val valueMinor: Long get() = Math.round(units * price * 100)
+}
+
 /** A transaction joined with the display names of its accounts. */
 data class TransactionListItem(
     val id: String,
@@ -162,6 +187,7 @@ data class TransactionListItem(
     val sourceObservationId: String?,
     val categoryId: String?,
     val toAccountId: String?,
+    val fromAccountId: String? = null,
     val categoryName: String?,
     val fromName: String?,
     val toName: String?

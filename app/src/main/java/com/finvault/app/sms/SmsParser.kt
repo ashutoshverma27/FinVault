@@ -125,7 +125,12 @@ object SmsParser {
 
     private val creditCardPattern = Regex("""(?i)\b(credit card|cc\b|card (?:no\.? )?(?:ending|xx|\*{2}))""")
 
-    private val debitCardPattern = Regex("""(?i)\bdebit card\b""")
+    private val debitCardPattern = Regex("""(?i)\b(debit card|dc\b|atm card|rupay debit)""")
+
+    /** Issuers / phrasings that only exist for credit cards. */
+    private val explicitCreditCardPattern = Regex(
+        """(?i)\b(credit card|creditcard|cc\s*(?:no|xx|ending|\*)|amex|american express|onecard|one card|slice card|avl\.? (?:cr\.? )?l(?:i)?mt|available (?:credit )?limit|credit limit)"""
+    )
 
     private val cardPattern = Regex("""(?i)\bcard\b""")
 
@@ -331,10 +336,14 @@ object SmsParser {
             .toList()
         val referenceId = extractReference(message)
 
-        val isCreditCard = creditCardPattern.containsMatchIn(message) ||
-                (cardPattern.containsMatchIn(message) &&
-                        !debitCardPattern.containsMatchIn(message) &&
-                        Regex("""(?i)\bspent\b""").containsMatchIn(message))
+        // "Debit Card xx1234" is the bank account; only an explicit or implied credit card is a card account.
+        val isCreditCard = !debitCardPattern.containsMatchIn(message) && (
+                explicitCreditCardPattern.containsMatchIn(message) ||
+                        creditCardPattern.containsMatchIn(message) ||
+                        (cardPattern.containsMatchIn(message) &&
+                                Regex("""(?i)\bspent\b""").containsMatchIn(message) &&
+                                !Regex("""(?i)\b(a/?c|account)\b""").containsMatchIn(message)))
+                || explicitCreditCardPattern.containsMatchIn(message)
 
         val merchant = extractMerchant(message)
         val categoryId = suggestCategory(message, merchant, isCredit && !isRefund)

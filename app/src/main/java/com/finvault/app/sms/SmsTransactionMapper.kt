@@ -44,7 +44,7 @@ object SmsTransactionMapper {
             .getOrDefault(TransactionCommand.Type.EXPENSE)
         val title = item.suggestedTitle.takeUnless { it == "SMS transaction" } ?: parsed.title
         val bank = bankName(item.sender)
-        val note = "From SMS · $bank"
+        val note = if (item.sender.startsWith("EMAIL:")) "From email · $bank" else "From SMS · $bank"
         val category = parsed.suggestedCategoryId
         val newAccounts = mutableListOf<AccountEntity>()
 
@@ -158,6 +158,13 @@ object SmsTransactionMapper {
 
     /** "VM-HDFCBK-S" -> "HDFC"; unknown senders fall back to the header itself. */
     fun bankName(sender: String): String {
+        // Email: "EMAIL:hdfcbank.net" -> look the bank up from the domain.
+        if (sender.startsWith("EMAIL:")) {
+            val domain = sender.removePrefix("EMAIL:").substringBefore('.').uppercase(Locale.ROOT)
+            bankNames.entries.firstOrNull { domain.startsWith(it.key) || (it.key.length >= 4 && domain.contains(it.key)) }
+                ?.let { return it.value }
+            return domain.lowercase(Locale.ROOT).replaceFirstChar { it.titlecase(Locale.ROOT) }.ifBlank { "Bank" }
+        }
         val parts = sender.trim().uppercase(Locale.ROOT).split('-')
         val header = if (parts.size >= 2 && parts[0].length == 2) parts[1] else parts.first()
         bankNames.entries.firstOrNull { header.startsWith(it.key) || (it.key.length >= 4 && header.contains(it.key)) }?.let { return it.value }

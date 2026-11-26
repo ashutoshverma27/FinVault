@@ -14,9 +14,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         JournalEntryEntity::class,
         JournalLineEntity::class,
         SmsObservationEntity::class,
-        MerchantRuleEntity::class
+        MerchantRuleEntity::class,
+        HoldingEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class FinVaultDatabase : RoomDatabase() {
@@ -29,6 +30,8 @@ abstract class FinVaultDatabase : RoomDatabase() {
     abstract fun monthlyOverviewDao(): MonthlyOverviewDao
 
     abstract fun merchantRuleDao(): MerchantRuleDao
+
+    abstract fun holdingDao(): HoldingDao
 
     companion object {
 
@@ -108,6 +111,27 @@ abstract class FinVaultDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS holdings (
+                        id TEXT NOT NULL,
+                        isin TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        assetType TEXT NOT NULL,
+                        units REAL NOT NULL,
+                        price REAL NOT NULL,
+                        priceDate TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """
+                )
+            }
+        }
+
         fun getInstance(context: Context): FinVaultDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -115,7 +139,7 @@ abstract class FinVaultDatabase : RoomDatabase() {
                     FinVaultDatabase::class.java,
                     "finvault.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { instance = it }
             }

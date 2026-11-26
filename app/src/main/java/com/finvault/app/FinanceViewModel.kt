@@ -233,6 +233,6 @@ class FinanceViewModel(application: Application) :
 
     private companion object {
         const val KEY_SMS_MAPPING_VERSION = "sms_mapping_version"
-        const val SMS_MAPPING_VERSION = 3
+        const val SMS_MAPPING_VERSION = 4
     }
 }

@@ -58,6 +58,25 @@ interface AccountDao {
 }
 
 @Dao
+interface HoldingDao {
+
+    @Query("SELECT * FROM holdings ORDER BY assetType, name")
+    fun observeAll(): Flow<List<HoldingEntity>>
+
+    @Query("SELECT * FROM holdings")
+    suspend fun getAll(): List<HoldingEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(items: List<HoldingEntity>)
+
+    @Query("DELETE FROM holdings WHERE assetType = :assetType")
+    suspend fun deleteType(assetType: String)
+
+    @Query("UPDATE holdings SET price = :price, priceDate = :priceDate, updatedAt = :now WHERE id = :id")
+    suspend fun updatePrice(id: String, price: Double, priceDate: String, now: Long = System.currentTimeMillis()): Int
+}
+
+@Dao
 interface MerchantRuleDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -96,6 +115,7 @@ interface TransactionDao {
             t.sourceObservationId AS sourceObservationId,
             t.categoryAccountId AS categoryId,
             t.toAccountId AS toAccountId,
+            t.fromAccountId AS fromAccountId,
             c.name AS categoryName,
             f.name AS fromName,
             d.name AS toName
@@ -198,6 +218,9 @@ interface TransactionDao {
         """
     )
     suspend fun getSmsExpensesInCategory(categoryId: String): List<FinancialTransactionEntity>
+
+    @Query("UPDATE financial_transactions SET fromAccountId = :fromId, toAccountId = :toId WHERE id = :id")
+    suspend fun updateTransferAccounts(id: String, fromId: String, toId: String): Int
 
     @Query("UPDATE financial_transactions SET categoryAccountId = :categoryId WHERE id = :id")
     suspend fun updateCategory(id: String, categoryId: String): Int

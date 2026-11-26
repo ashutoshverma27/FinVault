@@ -16,6 +16,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AccountBalance
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.Sms
@@ -77,6 +78,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val viewModel: FinanceViewModel by viewModels()
     private val monthlyViewModel: MonthlyFinanceViewModel by viewModels()
+    private val portfolioViewModel: com.finvault.app.invest.PortfolioViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -84,9 +86,11 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        com.finvault.app.invest.PriceUpdateWorker.schedule(this)
+        com.finvault.app.email.GmailSyncWorker.schedule(this)
         setContent {
             FinVaultTheme {
-                FinVaultApp(viewModel, monthlyViewModel)
+                FinVaultApp(viewModel, monthlyViewModel, portfolioViewModel)
             }
         }
     }
@@ -106,15 +110,20 @@ private enum class Tab(val label: String, val title: String, val icon: ImageVect
     HOME("Home", "FinVault", Icons.Rounded.Home),
     ACTIVITY("Activity", "Activity", Icons.AutoMirrored.Rounded.ReceiptLong),
     INSIGHTS("Insights", "Monthly overview", Icons.Rounded.Insights),
-    SMS("SMS", "SMS transactions", Icons.Rounded.Sms)
+    SMS("SMS", "SMS transactions", Icons.Rounded.Sms),
+    PORTFOLIO("Wealth", "Investments", Icons.Rounded.AccountBalance)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FinVaultApp(
     viewModel: FinanceViewModel,
-    monthlyViewModel: MonthlyFinanceViewModel
+    monthlyViewModel: MonthlyFinanceViewModel,
+    portfolioViewModel: com.finvault.app.invest.PortfolioViewModel
 ) {
+    val holdings by portfolioViewModel.holdings.collectAsStateWithLifecycle()
+    val gmailConnected by portfolioViewModel.gmailConnected.collectAsStateWithLifecycle()
+    val portfolioBusy by portfolioViewModel.busy.collectAsStateWithLifecycle()
     val balances by viewModel.balances.collectAsStateWithLifecycle()
     val transactions by viewModel.transactionItems.collectAsStateWithLifecycle()
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
@@ -284,6 +293,40 @@ private fun FinVaultApp(
                         onSelectMonth = monthlyViewModel::selectMonth,
                         onOpenSms = { tab = Tab.SMS },
                         onTransactionClick = { selectedTransaction = it }
+                    )
+
+                    Tab.PORTFOLIO -> com.finvault.app.ui.PortfolioScreen(
+                        holdings = holdings,
+                        gmailConnected = gmailConnected,
+                        busy = portfolioBusy,
+                        contentPadding = padding,
+                        onGmailAuthorized = {
+                            portfolioViewModel.onGmailAuthorized()
+                            notify("Gmail connected · syncing transaction emails")
+                        },
+                        onSyncGmail = {
+                            portfolioViewModel.syncGmailNow()
+                            notify("Syncing Gmail…")
+                        },
+                        onDisconnectGmail = portfolioViewModel::disconnectGmail,
+                        onImportCas = { uri, password ->
+                            portfolioViewModel.importCas(uri, password) { result ->
+                                result.onSuccess { notify("Imported ${it.mutualFunds} funds and ${it.stocks} stocks") }
+                                    .onFailure {
+                                        notify(
+                                            if (it is com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException) "Wrong CAS password"
+                                            else it.message ?: "Could not import CAS"
+                                        )
+                                    }
+                            }
+                        },
+                        onRefreshPrices = {
+                            portfolioViewModel.refreshPrices { result ->
+                                result.onSuccess { notify(if (it > 0) "Updated $it prices" else "Prices are up to date") }
+                                    .onFailure { notify(it.message ?: "Could not update prices") }
+                            }
+                        },
+                        notify = { notify(it) }
                     )
 
                     Tab.SMS -> SmsScreen(

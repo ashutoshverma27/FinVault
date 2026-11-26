@@ -37,10 +37,21 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
 
         const val INVESTMENTS = "account_investments"
 
+        /**
+         * Holding account for money sent to / received from the user's own name
+         * when the other bank's SMS hasn't been matched yet. Its balance shows
+         * transfers still waiting for their other half.
+         */
+        const val OTHER_OWN = "account_other_own"
+
+        /** Account-holder names on UPI / IMPS SMS. Payments to / from these are self transfers. */
+        val OWNER_NAMES = listOf("Ashutosh Verma")
+
         private const val SELF_TRANSFER_WINDOW = 30 * 60_000L
         private const val CARD_PAYMENT_WINDOW = 3 * 24 * 60 * 60_000L
         /** Two SMS quoting the same reference can arrive days apart (NEFT batches, delayed alerts). */
         private const val REFERENCE_WINDOW = 3 * 24 * 60 * 60_000L
+        private const val CROSS_CHANNEL_WINDOW = 20 * 60_000L
         private const val SAME_PAYMENT_WINDOW = 7 * 24 * 60 * 60_000L
         private const val REFUND_LOOKBACK = 60L * 24 * 60 * 60_000L
     }
@@ -89,10 +100,16 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                 }
 
                 val partner = findPartner(posting)
-                if (partner == null) {
-                    recordInternal(posting.command, item.id, "AUTO_POSTED")
-                } else {
-                    mergeWithPartner(posting, partner, item.id)
+                val ownerTransfer = if (partner == null) ownerTransfer(posting) else null
+                when {
+                    partner != null -> mergeWithPartner(posting, partner, item.id)
+                    ownerTransfer != null ->
+                        if (completeWaitingTransfer(ownerTransfer, posting)) {
+                            database.smsObservationDao().updateStatus(item.id, "MERGED")
+                        } else {
+                            recordInternal(ownerTransfer, item.id, "AUTO_POSTED")
+                        }
+                    else -> recordInternal(posting.command, item.id, "AUTO_POSTED")
                 }
             }
         }.isSuccess
@@ -243,9 +260,28 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             command.occurredAt - window, command.occurredAt + window
         ).filter { it.sourceObservationId != smsId }
 
+        val thisIsEmail = database.smsObservationDao().getById(smsId)?.sender?.startsWith("EMAIL:") == true
+
         for (candidate in candidates) {
             val sameRef = referencesMatch(ref, referenceOf(candidate))
             if (sameRef == false) continue
+
+            // The same payment reported by both SMS and email: same type, amount and account, close in time.
+            val candidateSender = candidate.sourceObservationId
+                ?.let { database.smsObservationDao().getById(it)?.sender }
+            val candidateIsEmail = candidateSender?.startsWith("EMAIL:") == true
+            if (candidateSender != null && candidateIsEmail != thisIsEmail &&
+                candidate.type == command.type.name &&
+                kotlin.math.abs(candidate.occurredAt - command.occurredAt) <= CROSS_CHANNEL_WINDOW
+            ) {
+                val candidateOwn = when (command.type) {
+                    TransactionCommand.Type.EXPENSE -> candidate.fromAccountId
+                    else -> candidate.toAccountId
+                }
+                val sameAccount = candidateOwn == posting.ownAccountId ||
+                        !isOwnSpecific(candidateOwn) || !isOwnSpecific(posting.ownAccountId)
+                if (sameRef == true || sameAccount) return true
+            }
 
             // Card bill payments have a bank-side and a card-side SMS; findPartner merges those.
             if (candidate.type == command.type.name && sameRef == true &&
@@ -375,6 +411,58 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             smsId,
             "AUTO_POSTED"
         )
+    }
+
+    /** Money sent to / received from the user's own name is a transfer, not spending or income. */
+    private suspend fun ownerTransfer(posting: SmsPosting): TransactionCommand? {
+        val command = posting.command
+        val payee = command.title.removePrefix("From ").trim()
+        val isOwner = OWNER_NAMES.any { MerchantKey.isOwnerName(payee, it) } ||
+                (posting.merchantKey ?: MerchantKey.fromTitle(command.title))
+                    ?.let { database.merchantRuleDao().get(it)?.kind == MerchantRuleEntity.OWNER } == true
+        if (!isOwner) return null
+        return when (command.type) {
+            TransactionCommand.Type.EXPENSE -> if (isOwnAsset(command.fromAccountId)) command.copy(
+                type = TransactionCommand.Type.TRANSFER, title = "Self transfer",
+                toAccountId = OTHER_OWN, categoryAccountId = null
+            ) else null
+            TransactionCommand.Type.INCOME -> command.copy(
+                type = TransactionCommand.Type.TRANSFER, title = "Self transfer",
+                fromAccountId = OTHER_OWN, categoryAccountId = null
+            )
+            else -> null
+        }
+    }
+
+    /**
+     * If the other half of this self transfer was already recorded against
+     * "My other accounts", fill in the real account instead of adding a second
+     * transfer. Matched on reference, or same amount within 30 minutes.
+     */
+    private suspend fun completeWaitingTransfer(transfer: TransactionCommand, posting: SmsPosting): Boolean {
+        val sending = transfer.toAccountId == OTHER_OWN
+        val own = if (sending) transfer.fromAccountId!! else transfer.toAccountId!!
+        val window = if (posting.referenceId != null) REFERENCE_WINDOW else SELF_TRANSFER_WINDOW
+        val waiting = database.transactionDao().findByAmount(
+            listOf("TRANSFER"), transfer.amountMinor, transfer.occurredAt - window, transfer.occurredAt + window
+        ).firstOrNull { candidate ->
+            val waitingSide = if (sending) candidate.fromAccountId else candidate.toAccountId
+            val otherSide = if (sending) candidate.toAccountId else candidate.fromAccountId
+            if (waitingSide != OTHER_OWN || otherSide == own) return@firstOrNull false
+            when (referencesMatch(posting.referenceId, referenceOf(candidate))) {
+                true -> true
+                false -> false
+                null -> kotlin.math.abs(candidate.occurredAt - transfer.occurredAt) <= SELF_TRANSFER_WINDOW
+            }
+        } ?: return false
+
+        database.ledgerDao().moveLine(waiting.id, OTHER_OWN, own)
+        if (sending) {
+            database.transactionDao().updateTransferAccounts(waiting.id, own, waiting.toAccountId!!)
+        } else {
+            database.transactionDao().updateTransferAccounts(waiting.id, waiting.fromAccountId!!, own)
+        }
+        return true
     }
 
     private suspend fun learnSelf(key: String, accountId: String) {
@@ -709,9 +797,13 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
                 AccountEntity(OTHER_INCOME, "Other Income", "INCOME", isSystem = true),
 
                 AccountEntity(OPENING_EQUITY, "Opening Balance Equity", "EQUITY", isSystem = true),
-                AccountEntity(INVESTMENTS, "Investments", "ASSET", isSystem = true)
+                AccountEntity(INVESTMENTS, "Investments", "ASSET", isSystem = true),
+                AccountEntity(OTHER_OWN, "My other accounts", "ASSET", isSystem = true)
             )
         )
+        OWNER_NAMES.mapNotNull { MerchantKey.fromMerchant(it) }.forEach { key ->
+            database.merchantRuleDao().upsert(MerchantRuleEntity(key, MerchantRuleEntity.OWNER, ""))
+        }
     }
 
     suspend fun record(command: TransactionCommand) {
