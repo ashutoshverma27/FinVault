@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AccountBalance
+import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material.icons.rounded.Sms
@@ -79,6 +80,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: FinanceViewModel by viewModels()
     private val monthlyViewModel: MonthlyFinanceViewModel by viewModels()
     private val portfolioViewModel: com.finvault.app.invest.PortfolioViewModel by viewModels()
+    private val emailViewModel: com.finvault.app.email.EmailViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -90,7 +92,7 @@ class MainActivity : ComponentActivity() {
         com.finvault.app.email.GmailSyncWorker.schedule(this)
         setContent {
             FinVaultTheme {
-                FinVaultApp(viewModel, monthlyViewModel, portfolioViewModel)
+                FinVaultApp(viewModel, monthlyViewModel, portfolioViewModel, emailViewModel)
             }
         }
     }
@@ -111,6 +113,7 @@ private enum class Tab(val label: String, val title: String, val icon: ImageVect
     ACTIVITY("Activity", "Activity", Icons.AutoMirrored.Rounded.ReceiptLong),
     INSIGHTS("Insights", "Monthly overview", Icons.Rounded.Insights),
     SMS("SMS", "SMS transactions", Icons.Rounded.Sms),
+    EMAIL("Email", "Email transactions", Icons.Rounded.Email),
     PORTFOLIO("Wealth", "Investments", Icons.Rounded.AccountBalance)
 }
 
@@ -119,10 +122,12 @@ private enum class Tab(val label: String, val title: String, val icon: ImageVect
 private fun FinVaultApp(
     viewModel: FinanceViewModel,
     monthlyViewModel: MonthlyFinanceViewModel,
-    portfolioViewModel: com.finvault.app.invest.PortfolioViewModel
+    portfolioViewModel: com.finvault.app.invest.PortfolioViewModel,
+    emailViewModel: com.finvault.app.email.EmailViewModel
 ) {
+    val emailStatus by emailViewModel.status.collectAsStateWithLifecycle()
+    val emails by emailViewModel.emails.collectAsStateWithLifecycle()
     val holdings by portfolioViewModel.holdings.collectAsStateWithLifecycle()
-    val gmailConnected by portfolioViewModel.gmailConnected.collectAsStateWithLifecycle()
     val portfolioBusy by portfolioViewModel.busy.collectAsStateWithLifecycle()
     val balances by viewModel.balances.collectAsStateWithLifecycle()
     val transactions by viewModel.transactionItems.collectAsStateWithLifecycle()
@@ -295,20 +300,29 @@ private fun FinVaultApp(
                         onTransactionClick = { selectedTransaction = it }
                     )
 
-                    Tab.PORTFOLIO -> com.finvault.app.ui.PortfolioScreen(
-                        holdings = holdings,
-                        gmailConnected = gmailConnected,
-                        busy = portfolioBusy,
+                    Tab.EMAIL -> com.finvault.app.ui.EmailScreen(
+                        status = emailStatus,
+                        emails = emails,
                         contentPadding = padding,
-                        onGmailAuthorized = {
-                            portfolioViewModel.onGmailAuthorized()
+                        onAuthorized = {
+                            emailViewModel.onAuthorized()
                             notify("Gmail connected · syncing transaction emails")
                         },
-                        onSyncGmail = {
-                            portfolioViewModel.syncGmailNow()
+                        onSyncNow = {
+                            emailViewModel.syncNow()
                             notify("Syncing Gmail…")
                         },
-                        onDisconnectGmail = portfolioViewModel::disconnectGmail,
+                        onDisconnect = emailViewModel::disconnect,
+                        onOpen = { item ->
+                            if (item.status == "AUTO_POSTED") editingAutoSms = item else if (item.status == "NEEDS_REVIEW") reviewingSms = item
+                        },
+                        notify = { notify(it) }
+                    )
+
+                    Tab.PORTFOLIO -> com.finvault.app.ui.PortfolioScreen(
+                        holdings = holdings,
+                        busy = portfolioBusy,
+                        contentPadding = padding,
                         onImportCas = { uri, password ->
                             portfolioViewModel.importCas(uri, password) { result ->
                                 result.onSuccess { notify("Imported ${it.mutualFunds} funds and ${it.stocks} stocks") }

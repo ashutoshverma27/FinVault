@@ -17,7 +17,10 @@ class GmailSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
 
     override suspend fun doWork(): Result =
         runCatching { GmailSync.sync(applicationContext) }
-            .fold({ Result.success() }, { if (runAttemptCount < 3) Result.retry() else Result.failure() })
+            .fold({ Result.success() }, {
+                GmailSync.recordError(applicationContext, it)
+                if (runAttemptCount < 3) Result.retry() else Result.failure()
+            })
 
     companion object {
         private const val PERIODIC = "finvault_gmail_sync"

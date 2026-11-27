@@ -13,20 +13,43 @@ object EmailText {
         """(?i)(otp|one time password|never share|do not share|password|pin\b|offer|cashback|apply now|click here|unsubscribe|download|disclaimer|this is a system generated|do not reply|privacy)"""
     )
 
+    private val numericEntity = Regex("""&#(x?)([0-9a-fA-F]+);""")
+    private val moneyOrVerb = Regex(
+        """(?i)(₹|\bINR\b|\bRs\.?\s*\d|debited|credited|spent|refund|reversed|withdrawn|received|sent|paid)"""
+    )
+
+    private val blockTag = Regex("""(?i)<\s*(br|/p|/div|/tr|/li|/td|/h[1-6]|/table)\b[^>]*>""")
+
     fun htmlToText(html: String): String {
-        var text = tag.replace(html, " ")
+        var text = blockTag.replace(html, "\n")
+        text = tag.replace(text, " ")
         entity.forEach { (k, v) -> text = text.replace(k, v, ignoreCase = true) }
+        text = numericEntity.replace(text) { m ->
+            val code = m.groupValues[2].toIntOrNull(if (m.groupValues[1].isNotEmpty()) 16 else 10)
+            code?.let { String(Character.toChars(it)) } ?: " "
+        }
         return text
     }
 
-    /** Subject + the first sentences of the body that describe the transaction. */
+    /**
+     * The sentences that describe the transaction (plus one either side for
+     * the account / reference), without headers, footers and safety text.
+     */
     fun clean(subject: String, body: String): String {
-        val sentences = (subject + ". " + body)
-            .replace(Regex("""\s+"""), " ")
-            .split(Regex("""(?<=[.!?])\s+|\s{2,}"""))
+        // Split on line / block breaks first, then sentences, so page headers and
+        // navigation links don't get glued to the transaction sentence.
+        val sentences = body
+            .replace('\u00A0', ' ')
+            .split('\n', '\r', '|')
+            .flatMap { it.replace(Regex("""\s+"""), " ").split(Regex("""(?<=[.!?])\s+(?=[A-Z₹])""")) }
             .map { it.trim() }
             .filter { it.isNotEmpty() && !noise.containsMatchIn(it) }
-        return sentences.joinToString(" ").take(700)
+        val hits = sentences.indices.filter { moneyOrVerb.containsMatchIn(sentences[it]) }
+        val keep = if (hits.isEmpty()) sentences.indices.toSet()
+        else hits.flatMap { listOf(it - 1, it, it + 1) }.filter { it in sentences.indices }.toSortedSet()
+        val text = keep.joinToString(" ") { sentences[it] }
+        val cleanSubject = subject.takeUnless { noise.containsMatchIn(it) }.orEmpty()
+        return "$cleanSubject. $text".trim().take(900)
     }
 
     /** "HDFC Bank InstaAlerts <alerts@hdfcbank.net>" -> "EMAIL:hdfcbank.net" */

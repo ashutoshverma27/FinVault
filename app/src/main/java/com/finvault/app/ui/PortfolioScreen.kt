@@ -49,12 +49,8 @@ import java.util.Locale
 @Composable
 fun PortfolioScreen(
     holdings: List<HoldingEntity>,
-    gmailConnected: Boolean,
     busy: Boolean,
     contentPadding: PaddingValues,
-    onGmailAuthorized: () -> Unit,
-    onSyncGmail: () -> Unit,
-    onDisconnectGmail: () -> Unit,
     onImportCas: (Uri, String) -> Unit,
     onRefreshPrices: () -> Unit,
     notify: (String) -> Unit
@@ -62,24 +58,8 @@ fun PortfolioScreen(
     val context = LocalContext.current
     var pickedPdf by remember { mutableStateOf<Uri?>(null) }
 
-    val consent = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) onGmailAuthorized() else notify("Gmail access was not granted")
-    }
     val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) pickedPdf = uri
-    }
-
-    fun connectGmail() {
-        Identity.getAuthorizationClient(context).authorize(GmailSync.request)
-            .addOnSuccessListener { result ->
-                val pending = result.pendingIntent
-                if (result.hasResolution() && pending != null) {
-                    consent.launch(IntentSenderRequest.Builder(pending.intentSender).build())
-                } else {
-                    onGmailAuthorized()
-                }
-            }
-            .addOnFailureListener { notify("Gmail sign-in failed: ${it.message}") }
     }
 
     val total = holdings.sumOf { it.valueMinor }
@@ -126,31 +106,6 @@ fun PortfolioScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-            }
-        }
-
-        item {
-            FvCard {
-                Text("GMAIL", style = EyebrowStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    if (gmailConnected) "Connected (read-only). Bank and card alert emails are added like SMS, every 6 hours."
-                    else "Connect Gmail (read-only) to also add online transactions from bank and card alert emails.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                if (gmailConnected && GmailSync.needsReconnect(context)) {
-                    Text("Gmail needs to be reconnected.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (!gmailConnected || GmailSync.needsReconnect(context)) {
-                        Button(onClick = { connectGmail() }, shape = RoundedCornerShape(14.dp)) { Text("Connect Gmail") }
-                    }
-                    if (gmailConnected) {
-                        OutlinedButton(onClick = onSyncGmail, shape = RoundedCornerShape(14.dp)) { Text("Sync now") }
-                        TextButton(onClick = onDisconnectGmail) { Text("Disconnect") }
-                    }
-                }
             }
         }
 

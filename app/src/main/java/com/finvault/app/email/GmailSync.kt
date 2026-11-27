@@ -39,6 +39,46 @@ object GmailSync {
     val request: AuthorizationRequest =
         AuthorizationRequest.builder().setRequestedScopes(listOf(Scope(SCOPE))).build()
 
+    private const val KEY_LAST_ERROR = "last_error"
+    private const val KEY_SYNC_VERSION = "sync_version"
+    private const val SYNC_VERSION = 2
+    private const val KEY_LAST_SCANNED = "last_scanned"
+    private const val KEY_LAST_DETECTED = "last_detected"
+    private const val KEY_TOTAL_SCANNED = "total_scanned"
+    private const val KEY_LAST_RUN = "last_run_millis"
+
+    data class Status(
+        val connected: Boolean,
+        val needsReconnect: Boolean,
+        val lastRunMillis: Long,
+        val lastScanned: Int,
+        val lastDetected: Int,
+        val totalScanned: Long,
+        val lastError: String?
+    )
+
+    fun status(context: Context): Status {
+        val p = prefs(context)
+        return Status(
+            connected = p.getBoolean(KEY_CONNECTED, false),
+            needsReconnect = p.getBoolean(KEY_NEEDS_RECONNECT, false),
+            lastRunMillis = p.getLong(KEY_LAST_RUN, 0L),
+            lastScanned = p.getInt(KEY_LAST_SCANNED, 0),
+            lastDetected = p.getInt(KEY_LAST_DETECTED, 0),
+            totalScanned = p.getLong(KEY_TOTAL_SCANNED, 0L),
+            lastError = p.getString(KEY_LAST_ERROR, null)
+        )
+    }
+
+    fun prefsName() = PREFS
+
+    fun recordError(context: Context, error: Throwable) {
+        prefs(context).edit()
+            .putString(KEY_LAST_ERROR, error.message ?: error.javaClass.simpleName)
+            .putLong(KEY_LAST_RUN, System.currentTimeMillis())
+            .apply()
+    }
+
     fun isConnected(context: Context) = prefs(context).getBoolean(KEY_CONNECTED, false)
     fun needsReconnect(context: Context) = prefs(context).getBoolean(KEY_NEEDS_RECONNECT, false)
     fun lastSyncSeconds(context: Context) = prefs(context).getLong(KEY_LAST_SYNC, 0L)
@@ -55,7 +95,9 @@ object GmailSync {
     private suspend fun silentToken(context: Context): String? {
         val result: AuthorizationResult = Identity.getAuthorizationClient(context).authorize(request).await()
         if (result.hasResolution()) {
-            prefs(context).edit().putBoolean(KEY_NEEDS_RECONNECT, true).apply()
+            prefs(context).edit().putBoolean(KEY_NEEDS_RECONNECT, true)
+                .putString(KEY_LAST_ERROR, "Gmail permission expired. Tap Connect Gmail again.")
+                .putLong(KEY_LAST_RUN, System.currentTimeMillis()).apply()
             return null
         }
         return result.accessToken
@@ -68,21 +110,36 @@ object GmailSync {
         val database = FinVaultDatabase.getInstance(context)
         val startedAt = System.currentTimeMillis() / 1000
 
+        // Parser fixes: re-check the full history once so emails missed before are picked up.
+        if (prefs(context).getInt(KEY_SYNC_VERSION, 1) < SYNC_VERSION) {
+            prefs(context).edit().remove(KEY_LAST_SYNC).putInt(KEY_SYNC_VERSION, SYNC_VERSION).apply()
+        }
         val last = lastSyncSeconds(context)
         // Overlap a day so late-delivered mail isn't missed; duplicates are filtered.
         val window = if (last > 0) "after:${last - 86_400}" else "newer_than:${FIRST_SYNC_DAYS}d"
         val ids = listMessageIds(token, "$QUERY $window")
 
         var stored = 0
+        var detected = 0
         ids.forEach { id ->
             val message = runCatching { getMessage(token, id) }.getOrNull() ?: return@forEach
             val observation = SmsIngestion.buildObservation(
                 sender = message.sender, body = message.text, receivedAt = message.receivedAt
             ) ?: return@forEach
+            detected++
             if (SmsIngestion.insertIfNew(database, observation, message.text)) stored++
         }
         FinVaultRepository(database).autoPostPendingSms()
-        prefs(context).edit().putLong(KEY_LAST_SYNC, startedAt).putBoolean(KEY_NEEDS_RECONNECT, false).apply()
+        val p = prefs(context)
+        p.edit()
+            .putLong(KEY_LAST_SYNC, startedAt)
+            .putBoolean(KEY_NEEDS_RECONNECT, false)
+            .putLong(KEY_LAST_RUN, System.currentTimeMillis())
+            .putInt(KEY_LAST_SCANNED, ids.size)
+            .putInt(KEY_LAST_DETECTED, detected)
+            .putLong(KEY_TOTAL_SCANNED, p.getLong(KEY_TOTAL_SCANNED, 0L) + ids.size)
+            .remove(KEY_LAST_ERROR)
+            .apply()
         stored
     }
 
@@ -144,7 +201,11 @@ object GmailSync {
         connection.connectTimeout = 20_000
         connection.readTimeout = 30_000
         try {
-            check(connection.responseCode == 200) { "Gmail API error ${connection.responseCode}" }
+            if (connection.responseCode != 200) {
+                val detail = connection.errorStream?.bufferedReader()?.readText()
+                    ?.let { runCatching { JSONObject(it).getJSONObject("error").getString("message") }.getOrNull() }
+                error("Gmail API error ${connection.responseCode}${detail?.let { ": $it" } ?: ""}")
+            }
             return connection.inputStream.bufferedReader().readText()
         } finally {
             connection.disconnect()

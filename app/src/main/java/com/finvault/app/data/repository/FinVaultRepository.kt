@@ -51,7 +51,8 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
         private const val CARD_PAYMENT_WINDOW = 3 * 24 * 60 * 60_000L
         /** Two SMS quoting the same reference can arrive days apart (NEFT batches, delayed alerts). */
         private const val REFERENCE_WINDOW = 3 * 24 * 60 * 60_000L
-        private const val CROSS_CHANNEL_WINDOW = 20 * 60_000L
+        /** Bank emails can lag the SMS for the same payment. */
+        private const val CROSS_CHANNEL_WINDOW = 60 * 60_000L
         private const val SAME_PAYMENT_WINDOW = 7 * 24 * 60 * 60_000L
         private const val REFUND_LOOKBACK = 60L * 24 * 60 * 60_000L
     }
@@ -254,7 +255,7 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     private suspend fun isAlreadyRecorded(posting: SmsPosting, smsId: String): Boolean {
         val command = posting.command
         val ref = posting.referenceId
-        val window = if (ref != null) REFERENCE_WINDOW else SELF_TRANSFER_WINDOW
+        val window = if (ref != null) REFERENCE_WINDOW else maxOf(SELF_TRANSFER_WINDOW, CROSS_CHANNEL_WINDOW)
         val candidates = database.transactionDao().findByAmount(
             listOf(command.type.name, "TRANSFER"), command.amountMinor,
             command.occurredAt - window, command.occurredAt + window
@@ -270,17 +271,19 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             val candidateSender = candidate.sourceObservationId
                 ?.let { database.smsObservationDao().getById(it)?.sender }
             val candidateIsEmail = candidateSender?.startsWith("EMAIL:") == true
+            // The same payment reported by both SMS and email. The SMS may already have
+            // become a transfer (self transfer, card bill), so match on the account side too.
             if (candidateSender != null && candidateIsEmail != thisIsEmail &&
-                candidate.type == command.type.name &&
+                (candidate.type == command.type.name || candidate.type == "TRANSFER") &&
                 kotlin.math.abs(candidate.occurredAt - command.occurredAt) <= CROSS_CHANNEL_WINDOW
             ) {
-                val candidateOwn = when (command.type) {
-                    TransactionCommand.Type.EXPENSE -> candidate.fromAccountId
-                    else -> candidate.toAccountId
-                }
-                val sameAccount = candidateOwn == posting.ownAccountId ||
-                        !isOwnSpecific(candidateOwn) || !isOwnSpecific(posting.ownAccountId)
-                if (sameRef == true || sameAccount) return true
+                val outgoing = command.type == TransactionCommand.Type.EXPENSE ||
+                        (command.type == TransactionCommand.Type.TRANSFER && command.fromAccountId == posting.ownAccountId)
+                val candidateOwn = if (outgoing) candidate.fromAccountId else candidate.toAccountId
+                val sameAccount = candidateOwn == posting.ownAccountId
+                val unknownAccount = candidate.type == command.type.name &&
+                        (!isOwnSpecific(candidateOwn) || !isOwnSpecific(posting.ownAccountId))
+                if (sameRef == true || sameAccount || unknownAccount) return true
             }
 
             // Card bill payments have a bank-side and a card-side SMS; findPartner merges those.

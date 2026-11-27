@@ -296,6 +296,12 @@ interface SmsObservationDao {
     )
     fun observePending(): Flow<List<SmsObservationEntity>>
 
+    @Query("SELECT * FROM sms_observations WHERE sender LIKE 'EMAIL:%' ORDER BY receivedAt DESC LIMIT 200")
+    fun observeEmails(): Flow<List<SmsObservationEntity>>
+
+    @Query("SELECT * FROM sms_observations WHERE sender NOT LIKE 'EMAIL:%' AND status = 'NEEDS_REVIEW' ORDER BY receivedAt DESC LIMIT 50")
+    fun observePendingSmsOnly(): Flow<List<SmsObservationEntity>>
+
     @Query("SELECT COUNT(*) FROM sms_observations WHERE status = 'NEEDS_REVIEW'")
     fun observePendingCount(): Flow<Int>
 
