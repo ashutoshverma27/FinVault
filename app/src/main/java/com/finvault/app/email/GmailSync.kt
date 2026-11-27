@@ -37,7 +37,7 @@ object GmailSync {
     private const val FIRST_SYNC_DAYS = 180
     private const val PAGE_SIZE = 100
     private const val PAGES_PER_RUN = 3
-    private const val PARALLEL_FETCHES = 8
+    private const val PARALLEL_FETCHES = 4
     private const val KEY_BACKLOG_QUERY = "backlog_query"
     private const val KEY_BACKLOG_STARTED = "backlog_started_seconds"
     private const val KEY_PAGE_TOKEN = "page_token"
@@ -260,14 +260,35 @@ object GmailSync {
         for (i in 0 until parts.length()) collectText(parts.getJSONObject(i), plain, html)
     }
 
+    /** Retries Gmail's per-user rate limit (429 / 403 rateLimitExceeded) with exponential backoff. */
     private fun get(token: String, url: String): String {
+        var delayMs = 1_000L
+        repeat(6) { attempt ->
+            try {
+                return getOnce(token, url)
+            } catch (e: RateLimited) {
+                if (attempt == 5) throw IllegalStateException("Gmail rate limit — will continue automatically")
+                Thread.sleep(delayMs + (0..500).random())
+                delayMs *= 2
+            }
+        }
+        error("unreachable")
+    }
+
+    private class RateLimited : Exception()
+
+    private fun getOnce(token: String, url: String): String {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.setRequestProperty("Authorization", "Bearer $token")
         connection.connectTimeout = 20_000
         connection.readTimeout = 30_000
         try {
             if (connection.responseCode != 200) {
-                val detail = connection.errorStream?.bufferedReader()?.readText()
+                val body = connection.errorStream?.bufferedReader()?.readText().orEmpty()
+                if (connection.responseCode == 429 ||
+                    (connection.responseCode == 403 && body.contains("rateLimit", ignoreCase = true))
+                ) throw RateLimited()
+                val detail = body.takeIf { it.isNotEmpty() }
                     ?.let { runCatching { JSONObject(it).getJSONObject("error").getString("message") }.getOrNull() }
                 error("Gmail API error ${connection.responseCode}${detail?.let { ": $it" } ?: ""}")
             }

@@ -72,8 +72,8 @@ interface HoldingDao {
     @Query("DELETE FROM holdings WHERE assetType = :assetType")
     suspend fun deleteType(assetType: String)
 
-    @Query("UPDATE holdings SET price = :price, priceDate = :priceDate, updatedAt = :now WHERE id = :id")
-    suspend fun updatePrice(id: String, price: Double, priceDate: String, now: Long = System.currentTimeMillis()): Int
+    @Query("UPDATE holdings SET price = :price, priceDate = :priceDate, name = :name, updatedAt = :now WHERE id = :id")
+    suspend fun updatePrice(id: String, price: Double, priceDate: String, name: String, now: Long = System.currentTimeMillis()): Int
 }
 
 @Dao

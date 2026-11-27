@@ -53,8 +53,10 @@ fun PortfolioScreen(
     contentPadding: PaddingValues,
     onImportCas: (Uri, String) -> Unit,
     onRefreshPrices: () -> Unit,
-    notify: (String) -> Unit
+    notify: (String) -> Unit,
+    onOpened: () -> Unit = {}
 ) {
+    androidx.compose.runtime.LaunchedEffect(holdings.isNotEmpty()) { onOpened() }
     val context = LocalContext.current
     var pickedPdf by remember { mutableStateOf<Uri?>(null) }
 
@@ -86,8 +88,9 @@ fun PortfolioScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                val asOf = holdings.map { it.priceDate }.filter { it.isNotBlank() }.distinct().take(2).joinToString(" / ")
                 Text(
-                    "Prices update daily from AMFI (NAV) and NSE (closing price).",
+                    "Latest NAV (AMFI) and end-of-day price (NSE)${if (asOf.isNotEmpty()) " · as of $asOf" else ""}. Updates daily.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

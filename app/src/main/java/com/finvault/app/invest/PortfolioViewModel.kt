@@ -33,6 +33,13 @@ class PortfolioViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refreshPrices(onResult: (Result<Int>) -> Unit) = run { onResult(runCatching { repository.refreshPrices() }) }
 
+    /** Called when the Wealth tab opens: refresh if prices are older than 12 hours. */
+    fun refreshIfStale(onResult: (Result<Int>) -> Unit) {
+        if (System.currentTimeMillis() - repository.lastRefreshMillis() > 12 * 60 * 60_000L && holdings.value.isNotEmpty()) {
+            refreshPrices(onResult)
+        }
+    }
+
     fun onGmailAuthorized() {
         val app = getApplication<Application>()
         GmailSync.markConnected(app)

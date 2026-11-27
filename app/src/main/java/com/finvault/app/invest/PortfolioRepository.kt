@@ -64,20 +64,39 @@ class PortfolioRepository(private val context: Context) {
         CasImportResult(holdings.count { it.assetType == "MF" }, holdings.count { it.assetType == "STOCK" })
     }
 
-    /** Updates every holding to the latest AMFI NAV / NSE close. Returns how many changed. */
+    /**
+     * Updates every holding to the latest AMFI NAV / NSE end-of-day close and
+     * the official scheme / company name. Returns how many holdings were priced.
+     * Throws if a needed price source couldn't be reached.
+     */
     suspend fun refreshPrices(): Int = withContext(Dispatchers.IO) {
         val holdings = dao.getAll()
         if (holdings.isEmpty()) return@withContext 0
-        val nav = if (holdings.any { it.assetType == "MF" }) runCatching { AmfiNav.fetch() }.getOrDefault(emptyMap()) else emptyMap()
-        val stocks = if (holdings.any { it.assetType == "STOCK" }) runCatching { NseBhavcopy.fetchLatest() }.getOrDefault(emptyMap()) else emptyMap()
-        var updated = 0
+        val errors = mutableListOf<String>()
+        val nav = if (holdings.any { it.assetType == "MF" }) {
+            runCatching { AmfiNav.fetch() }.onFailure { errors += "AMFI NAV: ${it.message}" }.getOrDefault(emptyMap())
+        } else emptyMap()
+        val stocks = if (holdings.any { it.assetType == "STOCK" }) {
+            runCatching { NseBhavcopy.fetchLatest() }.onFailure { errors += "NSE prices: ${it.message}" }.getOrDefault(emptyMap())
+                .also { if (it.isEmpty()) errors += "NSE prices: no bhavcopy for the last 7 days" }
+        } else emptyMap()
+
+        var priced = 0
         holdings.forEach { holding ->
             val quote = (if (holding.assetType == "MF") nav else stocks)[holding.isin] ?: return@forEach
-            if (quote.price != holding.price || quote.date != holding.priceDate) {
-                dao.updatePrice(holding.id, quote.price, quote.date)
-                updated++
-            }
+            dao.updatePrice(holding.id, quote.price, quote.date, quote.name ?: holding.name)
+            priced++
         }
-        updated
+        prefs.edit().putLong(KEY_LAST_REFRESH, System.currentTimeMillis()).apply()
+        if (priced == 0 && errors.isNotEmpty()) error(errors.joinToString("; "))
+        priced
+    }
+
+    private val prefs = context.getSharedPreferences("finvault_portfolio", Context.MODE_PRIVATE)
+
+    fun lastRefreshMillis() = prefs.getLong(KEY_LAST_REFRESH, 0L)
+
+    private companion object {
+        const val KEY_LAST_REFRESH = "last_price_refresh"
     }
 }

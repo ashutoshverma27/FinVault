@@ -10,7 +10,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.zip.ZipInputStream
 
-data class Quote(val price: Double, val date: String)
+data class Quote(val price: Double, val date: String, val name: String? = null)
 
 /** AMFI publishes every mutual fund's latest NAV once a day in NAVAll.txt. */
 object AmfiNav {
@@ -27,7 +27,10 @@ object AmfiNav {
             val parts = line.split(';')
             if (parts.size < 6) return@forEach
             val nav = parts[parts.size - 2].trim().toDoubleOrNull() ?: return@forEach
-            val quote = Quote(nav, parts.last().trim())
+            // Scheme name plus plan / option when AMFI lists them separately.
+            val name = parts.subList(3, parts.size - 2).map { it.trim() }.filter { it.isNotEmpty() && it != "-" }
+                .distinct().joinToString(" - ")
+            val quote = Quote(nav, parts.last().trim(), name.ifBlank { null })
             listOf(parts[1], parts[2]).map { it.trim() }
                 .filter { it.length == 12 && it.startsWith("INF") }
                 .forEach { result[it] = quote }
@@ -55,6 +58,8 @@ object NseBhavcopy {
         val closeCol = header.indexOf("ClsPric")
         val dateCol = header.indexOf("TradDt")
         val seriesCol = header.indexOf("SctySrs")
+        val nameCol = header.indexOf("FinInstrmNm")
+        val symbolCol = header.indexOf("TckrSymb")
         if (isinCol < 0 || closeCol < 0) return emptyMap()
         val result = HashMap<String, Quote>()
         lines.drop(1).forEach { line ->
@@ -64,7 +69,12 @@ object NseBhavcopy {
             val series = cols.getOrNull(seriesCol)?.trim()
             // Prefer the regular equity series when an ISIN trades in several.
             if (result.containsKey(isin) && series != "EQ") return@forEach
-            result[isin] = Quote(close, cols.getOrNull(dateCol)?.trim().orEmpty())
+            val name = cols.getOrNull(nameCol)?.trim()?.takeIf { it.isNotEmpty() }
+            val symbol = cols.getOrNull(symbolCol)?.trim()?.takeIf { it.isNotEmpty() }
+            result[isin] = Quote(
+                close, cols.getOrNull(dateCol)?.trim().orEmpty(),
+                listOfNotNull(name, symbol?.let { "($it)" }).joinToString(" ").ifBlank { null }
+            )
         }
         return result
     }

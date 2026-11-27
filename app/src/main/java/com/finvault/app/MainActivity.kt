@@ -340,7 +340,12 @@ private fun FinVaultApp(
                                     .onFailure { notify(it.message ?: "Could not update prices") }
                             }
                         },
-                        notify = { notify(it) }
+                        notify = { notify(it) },
+                        onOpened = {
+                            portfolioViewModel.refreshIfStale { result ->
+                                result.onFailure { notify(it.message ?: "Could not update prices") }
+                            }
+                        }
                     )
 
                     Tab.SMS -> SmsScreen(
