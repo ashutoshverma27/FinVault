@@ -16,11 +16,19 @@ import java.util.concurrent.TimeUnit
 class GmailSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result =
-        runCatching { GmailSync.sync(applicationContext) }
-            .fold({ Result.success() }, {
-                GmailSync.recordError(applicationContext, it)
-                if (runAttemptCount < 3) Result.retry() else Result.failure()
-            })
+        try {
+            val result = GmailSync.sync(applicationContext)
+            // More pages left: continue in a fresh run (each run stays well under Android's limit).
+            if (result.more) enqueueContinuation(applicationContext)
+            Result.success()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Stopped by the system. Progress is saved; pick up again soon.
+            enqueueContinuation(applicationContext)
+            throw e
+        } catch (e: Exception) {
+            GmailSync.recordError(applicationContext, e)
+            if (runAttemptCount < 3) Result.retry() else Result.failure()
+        }
 
     companion object {
         private const val PERIODIC = "finvault_gmail_sync"
@@ -42,7 +50,20 @@ class GmailSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
             )
         }
 
+        private const val CONTINUE = "finvault_gmail_sync_continue"
+
+        fun enqueueContinuation(context: Context) {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                CONTINUE, ExistingWorkPolicy.REPLACE,
+                OneTimeWorkRequestBuilder<GmailSyncWorker>()
+                    .setConstraints(network)
+                    .setInitialDelay(5, TimeUnit.SECONDS)
+                    .build()
+            )
+        }
+
         fun cancel(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(CONTINUE)
             WorkManager.getInstance(context).cancelUniqueWork(PERIODIC)
         }
     }

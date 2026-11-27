@@ -10,6 +10,11 @@ import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -30,7 +35,12 @@ object GmailSync {
     private const val KEY_LAST_SYNC = "last_sync_seconds"
     private const val KEY_NEEDS_RECONNECT = "needs_reconnect"
     private const val FIRST_SYNC_DAYS = 180
-    private const val MAX_MESSAGES_PER_RUN = 500
+    private const val PAGE_SIZE = 100
+    private const val PAGES_PER_RUN = 3
+    private const val PARALLEL_FETCHES = 8
+    private const val KEY_BACKLOG_QUERY = "backlog_query"
+    private const val KEY_BACKLOG_STARTED = "backlog_started_seconds"
+    private const val KEY_PAGE_TOKEN = "page_token"
 
     private const val QUERY =
         "(debited OR credited OR spent OR \"has been used\" OR refund OR refunded OR \"transaction alert\" OR txn OR \"payment received\" OR UPI) " +
@@ -41,7 +51,7 @@ object GmailSync {
 
     private const val KEY_LAST_ERROR = "last_error"
     private const val KEY_SYNC_VERSION = "sync_version"
-    private const val SYNC_VERSION = 2
+    private const val SYNC_VERSION = 3
     private const val KEY_LAST_SCANNED = "last_scanned"
     private const val KEY_LAST_DETECTED = "last_detected"
     private const val KEY_TOTAL_SCANNED = "total_scanned"
@@ -54,7 +64,9 @@ object GmailSync {
         val lastScanned: Int,
         val lastDetected: Int,
         val totalScanned: Long,
-        val lastError: String?
+        val lastError: String?,
+        /** A multi-page sync is under way (it continues automatically). */
+        val inProgress: Boolean = false
     )
 
     fun status(context: Context): Status {
@@ -66,7 +78,8 @@ object GmailSync {
             lastScanned = p.getInt(KEY_LAST_SCANNED, 0),
             lastDetected = p.getInt(KEY_LAST_DETECTED, 0),
             totalScanned = p.getLong(KEY_TOTAL_SCANNED, 0L),
-            lastError = p.getString(KEY_LAST_ERROR, null)
+            lastError = p.getString(KEY_LAST_ERROR, null),
+            inProgress = p.getString(KEY_BACKLOG_QUERY, null) != null
         )
     }
 
@@ -103,61 +116,113 @@ object GmailSync {
         return result.accessToken
     }
 
-    /** Returns the number of new transaction emails stored. */
-    suspend fun sync(context: Context): Int = withContext(Dispatchers.IO) {
-        if (!isConnected(context)) return@withContext 0
-        val token = silentToken(context) ?: return@withContext 0
+    private val syncLock = Mutex()
+
+    /** Outcome of one bounded run. [more] = the backlog isn't finished; run again. */
+    data class RunResult(val stored: Int, val more: Boolean)
+
+    /**
+     * Syncs in pages of 100 and saves the position after every page, so a run
+     * that Android stops (it may stop background work at any time, and always
+     * after 10 minutes) continues where it left off instead of starting over.
+     */
+    suspend fun sync(context: Context): RunResult = syncLock.withLock {
+        withContext(Dispatchers.IO) { syncLocked(context) }
+    }
+
+    private suspend fun syncLocked(context: Context): RunResult {
+        if (!isConnected(context)) return RunResult(0, false)
+        val token = silentToken(context) ?: return RunResult(0, false)
         val database = FinVaultDatabase.getInstance(context)
-        val startedAt = System.currentTimeMillis() / 1000
+        val p = prefs(context)
 
         // Parser fixes: re-check the full history once so emails missed before are picked up.
-        if (prefs(context).getInt(KEY_SYNC_VERSION, 1) < SYNC_VERSION) {
-            prefs(context).edit().remove(KEY_LAST_SYNC).putInt(KEY_SYNC_VERSION, SYNC_VERSION).apply()
+        if (p.getInt(KEY_SYNC_VERSION, 1) < SYNC_VERSION) {
+            p.edit().remove(KEY_LAST_SYNC).remove(KEY_BACKLOG_QUERY).remove(KEY_PAGE_TOKEN)
+                .putInt(KEY_SYNC_VERSION, SYNC_VERSION).apply()
         }
-        val last = lastSyncSeconds(context)
-        // Overlap a day so late-delivered mail isn't missed; duplicates are filtered.
-        val window = if (last > 0) "after:${last - 86_400}" else "newer_than:${FIRST_SYNC_DAYS}d"
-        val ids = listMessageIds(token, "$QUERY $window")
 
-        var stored = 0
-        var detected = 0
-        ids.forEach { id ->
-            val message = runCatching { getMessage(token, id) }.getOrNull() ?: return@forEach
-            val observation = SmsIngestion.buildObservation(
-                sender = message.sender, body = message.text, receivedAt = message.receivedAt
-            ) ?: return@forEach
-            detected++
-            if (SmsIngestion.insertIfNew(database, observation, message.text)) stored++
+        // Start a new backlog, or continue the saved one.
+        if (p.getString(KEY_BACKLOG_QUERY, null) == null) {
+            val last = p.getLong(KEY_LAST_SYNC, 0L)
+            // Overlap a day so late-delivered mail isn't missed; duplicates are filtered.
+            val window = if (last > 0) "after:${last - 86_400}" else "newer_than:${FIRST_SYNC_DAYS}d"
+            p.edit()
+                .putString(KEY_BACKLOG_QUERY, "$QUERY $window")
+                .putLong(KEY_BACKLOG_STARTED, System.currentTimeMillis() / 1000)
+                .remove(KEY_PAGE_TOKEN)
+                .putInt(KEY_LAST_SCANNED, 0)
+                .putInt(KEY_LAST_DETECTED, 0)
+                .apply()
         }
-        FinVaultRepository(database).autoPostPendingSms()
-        val p = prefs(context)
-        p.edit()
-            .putLong(KEY_LAST_SYNC, startedAt)
-            .putBoolean(KEY_NEEDS_RECONNECT, false)
-            .putLong(KEY_LAST_RUN, System.currentTimeMillis())
-            .putInt(KEY_LAST_SCANNED, ids.size)
-            .putInt(KEY_LAST_DETECTED, detected)
-            .putLong(KEY_TOTAL_SCANNED, p.getLong(KEY_TOTAL_SCANNED, 0L) + ids.size)
-            .remove(KEY_LAST_ERROR)
-            .apply()
-        stored
+        val query = p.getString(KEY_BACKLOG_QUERY, null)!!
+        var pageToken = p.getString(KEY_PAGE_TOKEN, null)
+        var stored = 0
+
+        repeat(PAGES_PER_RUN) {
+            val page = try {
+                listPage(token, query, pageToken)
+            } catch (e: IllegalStateException) {
+                // Expired page token: restart this backlog from the top (duplicates are skipped).
+                if (pageToken != null && e.message?.contains("400") == true) {
+                    p.edit().remove(KEY_PAGE_TOKEN).apply()
+                    return RunResult(stored, true)
+                }
+                throw e
+            }
+
+            val mails = coroutineScope {
+                page.ids.chunked(PARALLEL_FETCHES).flatMap { chunk ->
+                    chunk.map { id -> async { runCatching { getMessage(token, id) }.getOrNull() } }.awaitAll()
+                }.filterNotNull()
+            }
+            var detected = 0
+            mails.forEach { message ->
+                val observation = SmsIngestion.buildObservation(
+                    sender = message.sender, body = message.text, receivedAt = message.receivedAt
+                ) ?: return@forEach
+                detected++
+                if (SmsIngestion.insertIfNew(database, observation, message.text)) stored++
+            }
+            FinVaultRepository(database).autoPostPendingSms()
+
+            pageToken = page.nextPageToken
+            p.edit()
+                .putString(KEY_PAGE_TOKEN, pageToken)
+                .putInt(KEY_LAST_SCANNED, p.getInt(KEY_LAST_SCANNED, 0) + page.ids.size)
+                .putInt(KEY_LAST_DETECTED, p.getInt(KEY_LAST_DETECTED, 0) + detected)
+                .putLong(KEY_TOTAL_SCANNED, p.getLong(KEY_TOTAL_SCANNED, 0L) + page.ids.size)
+                .putLong(KEY_LAST_RUN, System.currentTimeMillis())
+                .putBoolean(KEY_NEEDS_RECONNECT, false)
+                .remove(KEY_LAST_ERROR)
+                .apply()
+
+            if (pageToken == null) {
+                // Backlog finished: next time only look at mail since it started.
+                p.edit()
+                    .putLong(KEY_LAST_SYNC, p.getLong(KEY_BACKLOG_STARTED, System.currentTimeMillis() / 1000))
+                    .remove(KEY_BACKLOG_QUERY)
+                    .remove(KEY_PAGE_TOKEN)
+                    .apply()
+                FinVaultRepository(database).removeEmailDuplicates()
+                return RunResult(stored, false)
+            }
+        }
+        return RunResult(stored, true)
+    }
+
+    private data class Page(val ids: List<String>, val nextPageToken: String?)
+
+    private fun listPage(token: String, query: String, pageToken: String?): Page {
+        val url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=$PAGE_SIZE&q=" +
+                URLEncoder.encode(query, "UTF-8") + (pageToken?.let { "&pageToken=$it" } ?: "")
+        val json = JSONObject(get(token, url))
+        val messages = json.optJSONArray("messages")
+        val ids = (0 until (messages?.length() ?: 0)).map { messages!!.getJSONObject(it).getString("id") }
+        return Page(ids, json.optString("nextPageToken").takeIf { it.isNotEmpty() })
     }
 
     private data class Mail(val sender: String, val text: String, val receivedAt: Long)
-
-    private fun listMessageIds(token: String, query: String): List<String> {
-        val ids = mutableListOf<String>()
-        var pageToken: String? = null
-        do {
-            val url = "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100&q=" +
-                    URLEncoder.encode(query, "UTF-8") + (pageToken?.let { "&pageToken=$it" } ?: "")
-            val json = JSONObject(get(token, url))
-            val messages = json.optJSONArray("messages")
-            for (i in 0 until (messages?.length() ?: 0)) ids += messages!!.getJSONObject(i).getString("id")
-            pageToken = json.optString("nextPageToken").takeIf { it.isNotEmpty() }
-        } while (pageToken != null && ids.size < MAX_MESSAGES_PER_RUN)
-        return ids.take(MAX_MESSAGES_PER_RUN)
-    }
 
     private fun getMessage(token: String, id: String): Mail {
         val json = JSONObject(get(token, "https://gmail.googleapis.com/gmail/v1/users/me/messages/$id?format=full"))

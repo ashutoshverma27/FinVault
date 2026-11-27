@@ -206,6 +206,16 @@ interface TransactionDao {
     )
     suspend fun getExpensesBetween(fromMillis: Long, toMillis: Long): List<FinancialTransactionEntity>
 
+    @Query(
+        """
+        SELECT t.* FROM financial_transactions t
+        JOIN sms_observations s ON s.id = t.sourceObservationId
+        WHERE s.sender LIKE 'EMAIL:%'
+        ORDER BY t.occurredAt
+        """
+    )
+    suspend fun getEmailTransactions(): List<FinancialTransactionEntity>
+
     @Query("SELECT * FROM financial_transactions WHERE type IN ('EXPENSE', 'REFUND')")
     suspend fun getSpendingTransactions(): List<FinancialTransactionEntity>
 

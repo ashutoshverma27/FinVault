@@ -91,6 +91,7 @@ class FinanceViewModel(application: Application) :
                 // that now have a recognisable merchant.
                 repository.remapAutoPostedSms()
                 repository.recategorizeGeneralSmsExpenses()
+                repository.removeEmailDuplicates()
                 prefs.edit().putInt(KEY_SMS_MAPPING_VERSION, SMS_MAPPING_VERSION).apply()
             } else {
                 // Anything detected while the app was closed goes into the ledger now.
@@ -233,6 +234,6 @@ class FinanceViewModel(application: Application) :
 
     private companion object {
         const val KEY_SMS_MAPPING_VERSION = "sms_mapping_version"
-        const val SMS_MAPPING_VERSION = 4
+        const val SMS_MAPPING_VERSION = 5
     }
 }

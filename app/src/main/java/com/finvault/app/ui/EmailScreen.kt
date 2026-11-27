@@ -114,6 +114,7 @@ fun EmailScreen(
                 Text(
                     when {
                         !status.connected -> "Not connected"
+                        status.inProgress -> "Syncing… ${status.lastScanned} emails checked so far"
                         status.lastRunMillis == 0L -> "Connected · first sync pending"
                         else -> "Connected · last sync ${dateTimeLabel(status.lastRunMillis)}"
                     },

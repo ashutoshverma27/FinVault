@@ -30,7 +30,7 @@ object SmsTransactionMapper {
         "CANBNK" to "Canara", "UNION" to "Union Bank", "UBI" to "Union Bank", "FEDERAL" to "Federal",
         "FEDBNK" to "Federal", "RBL" to "RBL", "AUBANK" to "AU Bank", "IDBI" to "IDBI", "CITI" to "Citi",
         "SCB" to "Standard Chartered", "HSBC" to "HSBC", "PAYTM" to "Paytm Bank", "AIRTEL" to "Airtel Bank",
-        "AMEX" to "Amex", "ONECARD" to "OneCard", "SLICE" to "Slice", "JUPITER" to "Jupiter", "FI" to "Fi"
+        "AMEX" to "Amex", "AMERICANEXPRESS" to "Amex", "SBICARD" to "SBI", "SBICRD" to "SBI", "ONECARD" to "OneCard", "SLICE" to "Slice", "JUPITER" to "Jupiter", "FI" to "Fi"
     )
 
     fun command(item: SmsObservationEntity, plainBody: String): TransactionCommand? =

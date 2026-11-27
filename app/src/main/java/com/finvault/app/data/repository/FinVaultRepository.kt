@@ -51,8 +51,7 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
         private const val CARD_PAYMENT_WINDOW = 3 * 24 * 60 * 60_000L
         /** Two SMS quoting the same reference can arrive days apart (NEFT batches, delayed alerts). */
         private const val REFERENCE_WINDOW = 3 * 24 * 60 * 60_000L
-        /** Bank emails can lag the SMS for the same payment. */
-        private const val CROSS_CHANNEL_WINDOW = 60 * 60_000L
+        private const val CROSS_CHANNEL_WINDOW = SameMovement.WINDOW
         private const val SAME_PAYMENT_WINDOW = 7 * 24 * 60 * 60_000L
         private const val REFUND_LOOKBACK = 60L * 24 * 60 * 60_000L
     }
@@ -255,37 +254,31 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
     private suspend fun isAlreadyRecorded(posting: SmsPosting, smsId: String): Boolean {
         val command = posting.command
         val ref = posting.referenceId
-        val window = if (ref != null) REFERENCE_WINDOW else maxOf(SELF_TRANSFER_WINDOW, CROSS_CHANNEL_WINDOW)
+        val window = if (ref != null) REFERENCE_WINDOW else CROSS_CHANNEL_WINDOW
         val candidates = database.transactionDao().findByAmount(
-            listOf(command.type.name, "TRANSFER"), command.amountMinor,
+            listOf("EXPENSE", "INCOME", "TRANSFER", "REFUND"), command.amountMinor,
             command.occurredAt - window, command.occurredAt + window
         ).filter { it.sourceObservationId != smsId }
+        if (candidates.isEmpty()) return false
 
         val thisIsEmail = database.smsObservationDao().getById(smsId)?.sender?.startsWith("EMAIL:") == true
+        val self = SameMovement.Movement(
+            type = command.type.name, amountMinor = command.amountMinor, occurredAt = command.occurredAt,
+            from = command.fromAccountId ?: posting.ownAccountId.takeIf { command.type == TransactionCommand.Type.EXPENSE },
+            to = command.toAccountId, reference = ref, isEmail = thisIsEmail
+        )
 
         for (candidate in candidates) {
-            val sameRef = referencesMatch(ref, referenceOf(candidate))
+            val candidateRef = referenceOf(candidate)
+            val sameRef = referencesMatch(ref, candidateRef)
+            val other = movementOf(candidate, candidateRef) ?: continue
+
+            // The same payment reported by SMS and by email.
+            if (other.isEmail != self.isEmail && SameMovement.matches(self, other)) return true
+
             if (sameRef == false) continue
 
-            // The same payment reported by both SMS and email: same type, amount and account, close in time.
-            val candidateSender = candidate.sourceObservationId
-                ?.let { database.smsObservationDao().getById(it)?.sender }
-            val candidateIsEmail = candidateSender?.startsWith("EMAIL:") == true
-            // The same payment reported by both SMS and email. The SMS may already have
-            // become a transfer (self transfer, card bill), so match on the account side too.
-            if (candidateSender != null && candidateIsEmail != thisIsEmail &&
-                (candidate.type == command.type.name || candidate.type == "TRANSFER") &&
-                kotlin.math.abs(candidate.occurredAt - command.occurredAt) <= CROSS_CHANNEL_WINDOW
-            ) {
-                val outgoing = command.type == TransactionCommand.Type.EXPENSE ||
-                        (command.type == TransactionCommand.Type.TRANSFER && command.fromAccountId == posting.ownAccountId)
-                val candidateOwn = if (outgoing) candidate.fromAccountId else candidate.toAccountId
-                val sameAccount = candidateOwn == posting.ownAccountId
-                val unknownAccount = candidate.type == command.type.name &&
-                        (!isOwnSpecific(candidateOwn) || !isOwnSpecific(posting.ownAccountId))
-                if (sameRef == true || sameAccount || unknownAccount) return true
-            }
-
+            // A second alert for the same payment on the same channel (same reference).
             // Card bill payments have a bank-side and a card-side SMS; findPartner merges those.
             if (candidate.type == command.type.name && sameRef == true &&
                 command.type != TransactionCommand.Type.TRANSFER
@@ -306,6 +299,52 @@ class FinVaultRepository(private val database: FinVaultDatabase) {
             }
         }
         return false
+    }
+
+    private suspend fun movementOf(transaction: FinancialTransactionEntity, reference: String?): SameMovement.Movement? {
+        val smsId = transaction.sourceObservationId ?: return null
+        val sender = database.smsObservationDao().getById(smsId)?.sender ?: return null
+        return SameMovement.Movement(
+            type = transaction.type, amountMinor = transaction.amountMinor, occurredAt = transaction.occurredAt,
+            from = transaction.fromAccountId, to = transaction.toAccountId,
+            reference = reference, isEmail = sender.startsWith("EMAIL:")
+        )
+    }
+
+    /**
+     * Removes email transactions that duplicate an SMS transaction already in the
+     * ledger (from before SMS / email matching was this thorough). The SMS one is
+     * kept; if the user had re-categorised the email one, the SMS one gets that category.
+     * Returns how many duplicates were removed.
+     */
+    suspend fun removeEmailDuplicates(): Int = withContext(Dispatchers.IO) {
+        val dao = database.transactionDao()
+        val smsDao = database.smsObservationDao()
+        var removed = 0
+        database.withTransaction {
+            dao.getEmailTransactions().forEach { email ->
+                val emailMovement = movementOf(email, referenceOf(email)) ?: return@forEach
+                val window = if (emailMovement.reference != null) REFERENCE_WINDOW else CROSS_CHANNEL_WINDOW
+                val match = dao.findByAmount(
+                    listOf("EXPENSE", "INCOME", "TRANSFER", "REFUND"), email.amountMinor,
+                    email.occurredAt - window, email.occurredAt + window
+                ).firstOrNull { candidate ->
+                    candidate.id != email.id && candidate.sourceObservationId != null &&
+                            movementOf(candidate, referenceOf(candidate))?.let { !it.isEmail && SameMovement.matches(emailMovement, it) } == true
+                } ?: return@forEach
+
+                val emailSms = email.sourceObservationId?.let { smsDao.getById(it) }
+                if (emailSms?.status == "POSTED" && email.categoryAccountId != null &&
+                    email.categoryAccountId != match.categoryAccountId && match.type == email.type
+                ) {
+                    moveCategory(match, email.categoryAccountId)
+                }
+                deleteTransaction(email.id)
+                email.sourceObservationId?.let { smsDao.updateStatus(it, "MERGED") }
+                removed++
+            }
+        }
+        removed
     }
 
     /**
